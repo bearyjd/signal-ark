@@ -20,6 +20,7 @@ from signal_ark.proto.Backup_pb2 import (
     ChatItem,
     Contact,
     Frame,
+    Group,
     Recipient,
     Self as SelfRecipient,
     StandardMessage,
@@ -151,6 +152,70 @@ def build_contact_recipient(
     return frame
 
 
+def _map_story_send_mode(mode_str: str | None) -> int:
+    if mode_str == "Never":
+        return 1  # DISABLED
+    if mode_str == "Always":
+        return 2  # ENABLED
+    return 0  # DEFAULT
+
+
+def build_group_recipient(
+    ids: IdAllocator,
+    conv: dict,
+    conv_id: str,
+) -> Frame | None:
+    """Build a Group recipient frame from a Desktop group conversation."""
+    master_key_b64 = conv.get("masterKey")
+    if not master_key_b64:
+        return None
+
+    rid = ids.alloc_recipient(conv_id)
+
+    frame = Frame()
+    frame.recipient.id = rid
+
+    group = frame.recipient.group
+    group.masterKey = _b64_to_bytes(master_key_b64)
+    group.whitelisted = bool(conv.get("profileSharing"))
+    group.hideStory = bool(conv.get("hideStory"))
+    group.storySendMode = _map_story_send_mode(conv.get("storySendMode"))
+    group.blocked = bool(conv.get("isBlocked"))
+
+    snapshot = group.snapshot
+    snapshot.version = int(conv.get("revision") or 0)
+    snapshot.announcements_only = bool(conv.get("announcementsOnly"))
+
+    # Title
+    name = conv.get("name")
+    if name:
+        snapshot.title.title = name
+
+    # Disappearing messages timer
+    expire_timer = conv.get("expireTimer")
+    if expire_timer:
+        snapshot.disappearingMessagesTimer.disappearingMessagesDuration = int(expire_timer)
+
+    # Access control
+    ac = conv.get("accessControl")
+    if ac:
+        snapshot.accessControl.attributes = int(ac.get("attributes", 0))
+        snapshot.accessControl.members = int(ac.get("members", 0))
+        snapshot.accessControl.addFromInviteLink = int(ac.get("addFromInviteLink", 0))
+
+    # Members
+    for m in conv.get("membersV2") or []:
+        aci = m.get("aci")
+        if not aci:
+            continue
+        member = snapshot.members.add()
+        member.userId = _uuid_str_to_bytes(aci)
+        member.role = int(m.get("role", 1))
+        member.joinedAtVersion = int(m.get("joinedAtVersion", 0))
+
+    return frame
+
+
 def build_chat(ids: IdAllocator, conv_id: str, conv: dict) -> Frame | None:
     """Build a Chat frame from a Desktop conversation."""
     recipient_id = ids.conversation_to_recipient.get(conv_id)
@@ -272,6 +337,7 @@ def map_desktop_to_frames(
     attachments_dir: Path,
     seed_backup_info: BackupInfo,
     seed_account_frame: Frame,
+    seed_frames: list[Frame],
     self_aci: str,
     output_files_dir: Path | None = None,
 ) -> MappingResult:
@@ -282,6 +348,7 @@ def map_desktop_to_frames(
         attachments_dir: Path to Desktop's attachments.noindex/ directory
         seed_backup_info: BackupInfo from the seed backup
         seed_account_frame: AccountData frame from the seed backup
+        seed_frames: All frames from the seed backup (for carrying over required frames)
         self_aci: Our own ACI UUID string
         output_files_dir: If provided, encrypt attachments here
     """
@@ -318,7 +385,38 @@ def map_desktop_to_frames(
     self_conv_id = self_conv["id"] if self_conv else "__self_placeholder__"
     frames.append(build_self_recipient(ids, self_conv_id))
 
-    # 3. Build recipients from conversations
+    # 2b. Carry over required seed frames (distribution lists, release notes, sticker packs)
+    seed_chat_folders: list[Frame] = []
+    for sf in seed_frames:
+        item_type = sf.WhichOneof("item")
+        if item_type == "recipient":
+            dest = sf.recipient.WhichOneof("destination")
+            if dest == "distributionList":
+                frames.append(sf)
+            elif dest == "releaseNotes":
+                frames.append(sf)
+        elif item_type == "stickerPack":
+            frames.append(sf)
+        elif item_type == "chatFolder":
+            seed_chat_folders.append(sf)
+
+    # 3. Build group recipients (prevents StorageSyncJob placeholder crash)
+    group_conversations = conn.execute("""
+        SELECT id, json
+        FROM conversations
+        WHERE type = 'group'
+        ORDER BY active_at DESC
+    """).fetchall()
+
+    for conv_row in group_conversations:
+        conv_json = json.loads(conv_row["json"])
+        conv_id = conv_row["id"]
+        group_frame = build_group_recipient(ids, conv_json, conv_id)
+        if group_frame:
+            frames.append(group_frame)
+            stats["recipients"] += 1
+
+    # 4. Build contact recipients from private conversations
     conversations = conn.execute("""
         SELECT id, json, active_at, type, e164, serviceId, profileName, profileFamilyName
         FROM conversations
@@ -334,7 +432,7 @@ def map_desktop_to_frames(
             frames.append(recipient_frame)
             stats["recipients"] += 1
 
-    # 4. Build chats for conversations that have messages
+    # 5. Build chats for conversations that have messages
     active_conversations = conn.execute("""
         SELECT DISTINCT c.id, c.json
         FROM conversations c
@@ -351,7 +449,7 @@ def map_desktop_to_frames(
             frames.append(chat_frame)
             stats["chats"] += 1
 
-    # 5. Build chat items from messages (ordered by received timestamp)
+    # 6. Build chat items from messages (ordered by received timestamp)
     messages = conn.execute("""
         SELECT m.id, m.body, m.type, m.sent_at, m.received_at, m.received_at_ms,
                m.timestamp, m.conversationId, m.sourceServiceId, m.serverTimestamp,
@@ -373,7 +471,7 @@ def map_desktop_to_frames(
         else:
             stats["skipped_messages"] += 1
 
-    # 6. Handle attachments (if output dir provided)
+    # 7. Handle attachments (if output dir provided)
     if output_files_dir:
         output_files_dir.mkdir(parents=True, exist_ok=True)
         attachments = conn.execute("""
@@ -404,6 +502,9 @@ def map_desktop_to_frames(
                 )
 
     conn.close()
+
+    # 8. Append chat folders at the end (must come after recipients and chats)
+    frames.extend(seed_chat_folders)
 
     # Use seed's BackupInfo with updated timestamp
     import time

@@ -145,6 +145,7 @@ def build(
         attachments_dir=attachments_dir,
         seed_backup_info=seed_result.backup_info,
         seed_account_frame=seed_account_frame,
+        seed_frames=seed_result.frames,
         self_aci=self_aci,
         output_files_dir=files_dir,
     )

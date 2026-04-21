@@ -92,5 +92,83 @@ def decrypt(seed_dir: Path, passphrase: str, aci: str | None, output: Path) -> N
     click.echo("Done.")
 
 
+@main.command()
+@click.option("--seed-dir", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--passphrase", required=True, help="64-char AccountEntropyPool")
+@click.option("--desktop-db", required=True, type=click.Path(exists=True, path_type=Path),
+              help="Decrypted Signal Desktop SQLite database")
+@click.option("--attachments-dir", required=True, type=click.Path(exists=True, path_type=Path),
+              help="Signal Desktop attachments.noindex/ directory")
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path),
+              help="Output directory for rebuilt backup")
+@click.option("--self-aci", required=True, help="Your ACI UUID (from Desktop items table)")
+def build(
+    seed_dir: Path,
+    passphrase: str,
+    desktop_db: Path,
+    attachments_dir: Path,
+    output: Path,
+    self_aci: str,
+) -> None:
+    """Build a v2 backup from Desktop data + seed backup."""
+    from signal_ark.encrypt import write_backup_directory
+    from signal_ark.mapper import map_desktop_to_frames
+
+    aep = validate_aep(passphrase)
+    backup_key = aep_to_backup_key(aep)
+    meta = decrypt_metadata(seed_dir / "metadata", backup_key)
+    hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
+
+    click.echo(f"BackupKey: {backup_key.hex()}")
+    click.echo(f"BackupId:  {meta.backup_id.hex()}")
+
+    # Decrypt seed to get BackupInfo and AccountData
+    seed_plaintext = decrypt_main((seed_dir / "main").read_bytes(), hmac_key, aes_key)
+    seed_result = parse_frames(seed_plaintext)
+    click.echo(f"Seed: {len(seed_result.frames)} frames")
+
+    seed_account_frame = None
+    for f in seed_result.frames:
+        if f.HasField("account"):
+            seed_account_frame = f
+            break
+
+    if seed_account_frame is None:
+        raise click.ClickException("No AccountData frame found in seed backup")
+
+    # Map Desktop data to frames
+    files_dir = output / "files"
+    click.echo("Mapping Desktop data to backup frames...")
+
+    result = map_desktop_to_frames(
+        db_path=desktop_db,
+        attachments_dir=attachments_dir,
+        seed_backup_info=seed_result.backup_info,
+        seed_account_frame=seed_account_frame,
+        self_aci=self_aci,
+        output_files_dir=files_dir,
+    )
+
+    click.echo(f"Mapped: {result.stats}")
+
+    # Write backup directory
+    backup_dir = output / "signal-backup-rebuilt"
+    write_backup_directory(
+        output_dir=backup_dir,
+        backup_info=result.backup_info,
+        frames=result.frames,
+        hmac_key=hmac_key,
+        aes_key=aes_key,
+        backup_key=backup_key,
+        backup_id=meta.backup_id,
+        media_names=result.media_names,
+        version=meta.version,
+    )
+
+    click.echo(f"Wrote backup to {backup_dir}")
+    click.echo(f"Files content store: {files_dir} ({len(result.media_names)} entries)")
+    click.echo("Done. Push to phone and test restore in Molly.")
+
+
 if __name__ == "__main__":
     main()

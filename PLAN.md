@@ -2,6 +2,12 @@
 
 **signal-ark** — Reconstruct Signal/Molly v2 backup archives from Signal Desktop data.
 
+## Credits
+
+Inspired by [transistor-man's writeup on restoring Android Signal from Desktop](https://transistor-man.com/restoring_android_signal_from_desktop.html).
+
+---
+
 ## 1. Prior Art Assessment
 
 ### bepaald/signalbackup-tools

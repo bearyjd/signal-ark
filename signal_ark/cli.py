@@ -171,5 +171,134 @@ def build(
     click.echo("Done. Push to phone and test restore in Molly.")
 
 
+@main.command()
+@click.option("--backup-dir", required=True, type=click.Path(exists=True, path_type=Path),
+              help="Backup directory containing main, metadata, files")
+@click.option("--passphrase", required=True, help="64-char AccountEntropyPool")
+@click.option("--files-dir", default=None, type=click.Path(exists=True, path_type=Path),
+              help="Attachment content store (files/ directory with XX/ shards)")
+def inspect(backup_dir: Path, passphrase: str, files_dir: Path | None) -> None:
+    """Inspect a v2 backup: validate structure, check attachments, report issues."""
+    import hashlib
+
+    aep = validate_aep(passphrase)
+    backup_key = aep_to_backup_key(aep)
+    meta = decrypt_metadata(backup_dir / "metadata", backup_key)
+    hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
+
+    click.echo(f"BackupId:  {meta.backup_id.hex()}")
+    click.echo(f"Version:   {meta.version}")
+
+    seed_plaintext = decrypt_main((backup_dir / "main").read_bytes(), hmac_key, aes_key)
+    result = parse_frames(seed_plaintext)
+    click.echo(f"BackupInfo version: {result.backup_info.version}")
+
+    # Frame stats
+    type_counts: dict[str, int] = {}
+    file_pointers: list[tuple[str, object]] = []
+    for frame in result.frames:
+        item_type = frame.WhichOneof("item") or "unknown"
+        type_counts[item_type] = type_counts.get(item_type, 0) + 1
+        if item_type == "chatItem":
+            ci = frame.chatItem
+            if ci.HasField("standardMessage"):
+                for ma in ci.standardMessage.attachments:
+                    fp = ma.pointer
+                    file_pointers.append((str(ci.dateSent), fp))
+
+    click.echo(f"\nFrame counts:")
+    for t, c in sorted(type_counts.items()):
+        click.echo(f"  {t:25s} {c}")
+
+    click.echo(f"\nAttachments in frames: {len(file_pointers)}")
+
+    # Files manifest
+    manifest_path = backup_dir / "files"
+    manifest_names: list[str] = []
+    if manifest_path.exists() and manifest_path.is_file():
+        manifest_names = parse_files_manifest(manifest_path.read_bytes())
+        click.echo(f"Files manifest entries: {len(manifest_names)}")
+
+    # Check FilePointer fields
+    issues: list[str] = []
+    missing_local_key = 0
+    missing_plaintext_hash = 0
+    missing_size = 0
+    for sent_at, fp in file_pointers:
+        li = fp.locatorInfo
+        if not li.localKey:
+            missing_local_key += 1
+        if not li.plaintextHash:
+            missing_plaintext_hash += 1
+        if not li.size:
+            missing_size += 1
+
+    if missing_local_key:
+        issues.append(f"{missing_local_key} attachments missing locatorInfo.localKey")
+    if missing_plaintext_hash:
+        issues.append(f"{missing_plaintext_hash} attachments missing locatorInfo.plaintextHash")
+    if missing_size:
+        issues.append(f"{missing_size} attachments missing locatorInfo.size")
+
+    # Cross-reference manifest with content store
+    if files_dir and manifest_names:
+        missing_files = 0
+        for name in manifest_names:
+            shard = name[:2]
+            if not (files_dir / shard / name).exists():
+                missing_files += 1
+        if missing_files:
+            issues.append(f"{missing_files}/{len(manifest_names)} manifest entries have no file in content store")
+        else:
+            click.echo(f"Content store:  all {len(manifest_names)} files present")
+
+    # Verify a sample attachment round-trip
+    if files_dir and file_pointers:
+        click.echo(f"\nSample attachment validation:")
+        for sent_at, fp in file_pointers[:3]:
+            li = fp.locatorInfo
+            if not li.localKey or not li.plaintextHash:
+                continue
+            media_name = hashlib.sha256(bytes(li.plaintextHash) + bytes(li.localKey)).hexdigest()
+            shard = media_name[:2]
+            fpath = files_dir / shard / media_name
+            if not fpath.exists():
+                click.echo(f"  [{sent_at}] {fp.contentType} — FILE MISSING ({media_name[:16]}...)")
+                continue
+            try:
+                from cryptography.hazmat.primitives import hashes as _h, hmac as _hmac, padding
+                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+                enc = fpath.read_bytes()
+                iv, ct, mac = enc[:16], enc[16:-32], enc[-32:]
+                lk = bytes(li.localKey)
+                h = _hmac.HMAC(lk[32:], _h.SHA256())
+                h.update(iv)
+                h.update(ct)
+                h.verify(mac)
+
+                cipher = Cipher(algorithms.AES(lk[:32]), modes.CBC(iv))
+                dec = cipher.decryptor()
+                padded = dec.update(ct) + dec.finalize()
+                unpadder = padding.PKCS7(128).unpadder()
+                pt = unpadder.update(padded) + unpadder.finalize()
+
+                pt_hash = hashlib.sha256(pt).digest()
+                hash_ok = pt_hash == bytes(li.plaintextHash)
+                size_ok = len(pt) == li.size if li.size else "no size"
+
+                click.echo(f"  [{sent_at}] {fp.contentType:15s} decrypt=OK  hash={'OK' if hash_ok else 'MISMATCH'}  size={size_ok}  {len(pt)} bytes")
+            except Exception as e:
+                click.echo(f"  [{sent_at}] {fp.contentType} — DECRYPT FAILED: {e}")
+
+    # Summary
+    if issues:
+        click.echo(f"\nIssues found:")
+        for i in issues:
+            click.echo(f"  - {i}")
+    else:
+        click.echo(f"\nNo issues found.")
+
+
 if __name__ == "__main__":
     main()

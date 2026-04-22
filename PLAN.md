@@ -175,7 +175,11 @@ To reconstruct: we derive the LocalMetadataKey from our BackupKey, then can both
 
 ## 7. Implementation Plan
 
-### Phase 1: Decrypt-only proof of life
+> **Status as of 2026-04-21:** Phases 1–4 complete. CLI works end-to-end.
+> Successfully built and restored a backup with 1,855 recipients, 240 chats,
+> 36,657 messages, and 4,956 attachments on Signal Android.
+
+### Phase 1: Decrypt-only proof of life ✅
 **Goal:** Decrypt the empty seed backup and dump frames as JSONL.
 
 1. **Set up Python project** (`~/signal_fix/newformat/`)
@@ -208,7 +212,7 @@ To reconstruct: we derive the LocalMetadataKey from our BackupKey, then can both
    - `--seed-dir`, `--passphrase` (the 64-char AEP), `--aci` (your UUID)
    - Output: `decrypted/main.plaintext`, `decrypted/frames.jsonl`, `decrypted/metadata.json`
 
-### Phase 2: Encrypt (round-trip)
+### Phase 2: Encrypt (round-trip) ✅
 **Goal:** Decrypt seed → re-encrypt → restore on phone → verify identical behavior.
 
 1. **Implement encryptor** (`encrypt.py`)
@@ -234,7 +238,7 @@ To reconstruct: we derive the LocalMetadataKey from our BackupKey, then can both
    - User pushes to phone, restores in Molly
    - Success = Molly accepts and shows empty state
 
-### Phase 3: Desktop DB → archive frames
+### Phase 3: Desktop DB → archive frames ✅
 **Goal:** Map Signal Desktop data into v2 archive frames.
 
 1. **Extract Desktop data**
@@ -261,7 +265,7 @@ To reconstruct: we derive the LocalMetadataKey from our BackupKey, then can both
    - Write to `files/XX/mediaName`
    - Reference in frame via `FilePointer.LocatorInfo.localKey`
 
-### Phase 4: End-to-end
+### Phase 4: End-to-end ✅
 **Goal:** Produce complete rebuilt backup directory, restore on phone.
 
 1. Merge seed AccountData frame with Desktop-sourced Recipient/Chat/ChatItem frames

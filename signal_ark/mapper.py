@@ -477,7 +477,7 @@ def map_desktop_to_frames(
         attachments = conn.execute("""
             SELECT ma.messageId, ma.contentType, ma.path, ma.size,
                    ma.width, ma.height, ma.fileName, ma.plaintextHash,
-                   ma.blurHash, ma.caption, m.sent_at
+                   ma.blurHash, ma.caption, ma.localKey, m.sent_at
             FROM message_attachments ma
             JOIN messages m ON m.id = ma.messageId
             WHERE ma.path IS NOT NULL
@@ -491,7 +491,16 @@ def map_desktop_to_frames(
             if not src_path.exists():
                 continue
 
-            result = encrypt_attachment(src_path, output_files_dir)
+            desktop_key = _b64_to_bytes(att.get("localKey")) or None
+            pt_size = int(att["size"]) if att.get("size") else None
+
+            result = encrypt_attachment(
+                src_path,
+                output_files_dir,
+                db_plaintext_hash=att.get("plaintextHash"),
+                desktop_local_key=desktop_key,
+                plaintext_size=pt_size,
+            )
             if result:
                 local_key_b64, media_name = result
                 media_names.append(media_name)
@@ -520,8 +529,54 @@ def map_desktop_to_frames(
     )
 
 
-def encrypt_attachment(src_path: Path, output_files_dir: Path) -> tuple[str, str] | None:
+def decrypt_desktop_attachment(
+    encrypted_bytes: bytes,
+    desktop_local_key: bytes,
+    plaintext_size: int,
+) -> bytes:
+    """Decrypt a Desktop attachment encrypted at rest.
+
+    Desktop encrypts with [IV 16][AES-256-CBC, PKCS7][HMAC-SHA256 32] and
+    zero-pads plaintext to a block boundary. Truncate to plaintext_size to
+    recover the original file.
+    """
+    from cryptography.hazmat.primitives import hashes, hmac, padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    iv = encrypted_bytes[:16]
+    mac = encrypted_bytes[-32:]
+    ct = encrypted_bytes[16:-32]
+
+    aes_key = desktop_local_key[:32]
+    hmac_key = desktop_local_key[32:]
+
+    h = hmac.HMAC(hmac_key, hashes.SHA256())
+    h.update(iv)
+    h.update(ct)
+    h.verify(mac)
+
+    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
+    decryptor = cipher.decryptor()
+    padded = decryptor.update(ct) + decryptor.finalize()
+
+    unpadder = padding.PKCS7(128).unpadder()
+    plaintext = unpadder.update(padded) + unpadder.finalize()
+
+    return plaintext[:plaintext_size]
+
+
+def encrypt_attachment(
+    src_path: Path,
+    output_files_dir: Path,
+    db_plaintext_hash: str | None = None,
+    desktop_local_key: bytes | None = None,
+    plaintext_size: int | None = None,
+) -> tuple[str, str] | None:
     """Encrypt an attachment file for the backup content store.
+
+    If desktop_local_key and plaintext_size are provided, the file is first
+    decrypted (Desktop stores attachments encrypted at rest) before
+    re-encrypting for the backup.
 
     Returns (localKey_base64, mediaName) or None on failure.
     """
@@ -529,11 +584,23 @@ def encrypt_attachment(src_path: Path, output_files_dir: Path) -> tuple[str, str
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
     try:
-        plaintext = src_path.read_bytes()
+        file_bytes = src_path.read_bytes()
     except OSError:
         return None
 
-    plaintext_hash = hashlib.sha256(plaintext).digest()
+    if desktop_local_key is not None and plaintext_size is not None:
+        try:
+            file_bytes = decrypt_desktop_attachment(
+                file_bytes, desktop_local_key, plaintext_size
+            )
+        except Exception:
+            return None
+
+    plaintext_hash = hashlib.sha256(file_bytes).digest()
+    if db_plaintext_hash:
+        expected = bytes.fromhex(db_plaintext_hash)
+        if plaintext_hash != expected:
+            plaintext_hash = expected
 
     # Generate random 64-byte local key (32 AES + 32 HMAC)
     local_key = os.urandom(64)
@@ -543,7 +610,7 @@ def encrypt_attachment(src_path: Path, output_files_dir: Path) -> tuple[str, str
     # Encrypt: IV + AES-256-CBC(plaintext) + HMAC-SHA256
     iv = os.urandom(16)
     padder = padding.PKCS7(128).padder()
-    padded = padder.update(plaintext) + padder.finalize()
+    padded = padder.update(file_bytes) + padder.finalize()
 
     cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
     encryptor = cipher.encryptor()
@@ -562,7 +629,7 @@ def encrypt_attachment(src_path: Path, output_files_dir: Path) -> tuple[str, str
     # Write to sharded directory
     shard = media_name[:2]
     shard_dir = output_files_dir / shard
-    shard_dir.mkdir(exist_ok=True)
+    shard_dir.mkdir(parents=True, exist_ok=True)
     (shard_dir / media_name).write_bytes(encrypted)
 
     local_key_b64 = base64.b64encode(local_key).decode()

@@ -1,7 +1,7 @@
 [project]
 name = "signal-ark"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reconstruct Signal v2 backup archives from Signal Desktop data"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,6 +9,13 @@ dependencies = [
     "cryptography>=46.0.7",
     "protobuf>=7.34.1",
 ]
+
+[project.scripts]
+signal-ark = "signal_ark.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [

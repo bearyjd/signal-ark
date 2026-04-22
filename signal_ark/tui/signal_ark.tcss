@@ -1,0 +1,121 @@
+Screen {
+    align: center middle;
+}
+
+#welcome-container {
+    width: 60;
+    height: auto;
+    padding: 2 4;
+    border: solid #3A76F0;
+    background: $surface;
+}
+
+#welcome-title {
+    text-align: center;
+    text-style: bold;
+    color: #3A76F0;
+    margin-bottom: 1;
+}
+
+#welcome-subtitle {
+    text-align: center;
+    color: $text-muted;
+    margin-bottom: 2;
+}
+
+#input-container {
+    width: 80;
+    max-height: 90%;
+    padding: 2 4;
+    border: solid #3A76F0;
+    background: $surface;
+    overflow-y: auto;
+}
+
+#input-title {
+    text-style: bold;
+    color: #3A76F0;
+    margin-bottom: 1;
+}
+
+.field-label {
+    margin-top: 1;
+    color: $text;
+    text-style: bold;
+}
+
+.field-error {
+    color: $error;
+}
+
+#preview-container {
+    width: 80;
+    max-height: 90%;
+    padding: 2 4;
+    border: solid #3A76F0;
+    background: $surface;
+    overflow-y: auto;
+}
+
+#preview-title {
+    text-style: bold;
+    color: #3A76F0;
+    margin-bottom: 1;
+}
+
+#progress-container {
+    width: 80;
+    max-height: 90%;
+    padding: 2 4;
+    border: solid #3A76F0;
+    background: $surface;
+}
+
+#progress-title {
+    text-style: bold;
+    color: #3A76F0;
+    margin-bottom: 1;
+}
+
+#progress-log {
+    height: 1fr;
+    min-height: 10;
+    margin-top: 1;
+    border: solid $primary-background;
+}
+
+#results-container {
+    width: 80;
+    max-height: 90%;
+    padding: 2 4;
+    border: solid #3A76F0;
+    background: $surface;
+    overflow-y: auto;
+}
+
+#results-title {
+    text-style: bold;
+    color: #3A76F0;
+    margin-bottom: 1;
+}
+
+#results-success {
+    text-align: center;
+    color: $success;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.button-row {
+    margin-top: 2;
+    align: center middle;
+    height: auto;
+}
+
+Button {
+    margin: 0 1;
+}
+
+Button.primary {
+    background: #3A76F0;
+}

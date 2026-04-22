@@ -300,5 +300,13 @@ def inspect(backup_dir: Path, passphrase: str, files_dir: Path | None) -> None:
         click.echo(f"\nNo issues found.")
 
 
+@main.command()
+def tui() -> None:
+    """Launch the interactive TUI wizard."""
+    from signal_ark.tui import launch
+
+    launch()
+
+
 if __name__ == "__main__":
     main()

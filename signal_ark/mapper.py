@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -340,6 +341,7 @@ def map_desktop_to_frames(
     seed_frames: list[Frame],
     self_aci: str,
     output_files_dir: Path | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
 ) -> MappingResult:
     """Map Signal Desktop data to v2 backup frames.
 

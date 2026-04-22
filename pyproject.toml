@@ -10,6 +10,9 @@ dependencies = [
     "protobuf>=7.34.1",
 ]
 
+[project.optional-dependencies]
+tui = ["textual>=1.0.0"]
+
 [project.scripts]
 signal-ark = "signal_ark.cli:main"
 
@@ -21,4 +24,5 @@ build-backend = "hatchling.build"
 dev = [
     "mypy-protobuf>=5.0.0",
     "pytest>=9.0.3",
+    "pytest-asyncio>=0.23.0",
 ]

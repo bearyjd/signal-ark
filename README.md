@@ -24,7 +24,17 @@ pip install .      # or with pip
 | `signal-ark decrypt` | Decrypt a v2 backup seed directory and dump frames as JSONL |
 | `signal-ark build` | Build a v2 backup from Desktop data + seed backup |
 | `signal-ark inspect` | Validate a built backup: frame structure, manifest, attachment decryption |
+| `signal-ark tui` | Launch the interactive TUI wizard (requires `[tui]` extra) |
 <!-- /AUTO-GENERATED:commands -->
+
+### TUI Wizard (optional)
+
+```bash
+pip install signal-ark[tui]   # or: uv sync --extra tui
+signal-ark tui
+```
+
+The TUI provides a step-by-step wizard for building backups and inspecting them, with file browsing, masked passphrase entry, and progress tracking.
 
 ## Usage
 

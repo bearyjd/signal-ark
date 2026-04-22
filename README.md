@@ -109,6 +109,8 @@ signal_ark/
 └── proto/       — Generated protobuf bindings (Backup.proto, LocalArchive.proto)
 ```
 
+See [v2 Backup Format Specification](docs/v2-backup-format.md) for a complete description of the binary format, crypto, and frame structure.
+
 ## What gets restored
 
 | Content | Status |

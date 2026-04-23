@@ -100,7 +100,6 @@ The `decrypt_desktop_attachment` function in `mapper.py` handles this decryption
 ## Open questions
 
 - **Backup directory layout on phone** — Does Signal Android expect `files/` as a sibling to the backup dir or inside it? Current code produces them as siblings under `output/`. Needs verification against a working restore.
-- **Older Desktop DB support** — The mapper queries `message_attachments` which doesn't exist in older Desktop versions. Needs a fallback path that reads attachment info from `messages.json`.
 
 ## Reference material
 

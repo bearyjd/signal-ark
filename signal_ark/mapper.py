@@ -17,18 +17,17 @@ from pathlib import Path
 from signal_ark.proto.Backup_pb2 import (
     AccountData,
     BackupInfo,
-    Chat,
     ChatItem,
     Contact,
     Frame,
-    Group,
-    Recipient,
-    Self as SelfRecipient,
-    StandardMessage,
-    Text,
-    FilePointer,
+    GroupCall,
+    IndividualCall,
     MessageAttachment,
+    Quote,
+    Reaction,
+    Self as SelfRecipient,
     SendStatus,
+    StandardMessage,
 )
 
 
@@ -68,6 +67,59 @@ def _b64_to_bytes(b64: str | None) -> bytes:
     if not b64:
         return b""
     return base64.b64decode(b64)
+
+
+def _resolve_recipient_id(ids: IdAllocator, identifier: str | None) -> int:
+    """Resolve a Desktop identifier to a backup recipient ID."""
+    if not identifier:
+        return 0
+    return (
+        ids.service_id_to_recipient.get(identifier)
+        or ids.conversation_to_recipient.get(identifier)
+        or 0
+    )
+
+
+def _map_reactions(msg_json: dict, ids: IdAllocator) -> list[Reaction]:
+    """Extract reactions from Desktop message JSON."""
+    reactions_data = msg_json.get("reactions")
+    if not reactions_data:
+        return []
+
+    result = []
+    for r in reactions_data:
+        reaction = Reaction()
+        reaction.emoji = r.get("emoji", "")
+        reaction.authorId = _resolve_recipient_id(ids, r.get("fromId"))
+        reaction.sentTimestamp = r.get("timestamp", 0)
+        reaction.sortOrder = r.get("receivedAtDate", r.get("timestamp", 0))
+        result.append(reaction)
+
+    return result
+
+
+def _map_quote(msg_json: dict, ids: IdAllocator) -> Quote | None:
+    """Extract quote from Desktop message JSON."""
+    quote_data = msg_json.get("quote")
+    if not quote_data:
+        return None
+
+    quote = Quote()
+
+    target_ts = quote_data.get("id")
+    if target_ts:
+        quote.targetSentTimestamp = int(target_ts)
+
+    author_id = quote_data.get("authorAci") or quote_data.get("authorUuid")
+    if author_id:
+        quote.authorId = _resolve_recipient_id(ids, author_id)
+
+    text = quote_data.get("text")
+    if text:
+        quote.text.body = text
+
+    quote.type = 1  # NORMAL
+    return quote
 
 
 def build_account_frame(seed_account: AccountData) -> Frame:
@@ -307,11 +359,19 @@ def build_chat_item(
                 ss.sent.sealedSender = False
             outgoing.sendStatus.append(ss)
 
-    # Message body
+    # Message body, reactions, and quote
     body = msg_row.get("body")
-    if body:
+    reactions = _map_reactions(msg_json, ids)
+    quote = _map_quote(msg_json, ids)
+
+    if body or reactions or quote:
         std_msg = StandardMessage()
-        std_msg.text.body = body
+        if body:
+            std_msg.text.body = body
+        if quote:
+            std_msg.quote.CopyFrom(quote)
+        for r in reactions:
+            std_msg.reactions.append(r)
         item.standardMessage.CopyFrom(std_msg)
 
     # Expiration
@@ -323,6 +383,144 @@ def build_chat_item(
         item.expireStartDate = int(expire_start)
 
     return frame
+
+
+def _get_call_info(
+    msg_json: dict,
+    conn: sqlite3.Connection,
+    has_calls_table: bool,
+) -> dict | None:
+    """Look up call details from callsHistory table or message JSON fallback."""
+    call_id = msg_json.get("callId")
+    if call_id and has_calls_table:
+        row = conn.execute(
+            "SELECT callId, peerId, ringerId, mode, type, direction, status, timestamp"
+            " FROM callsHistory WHERE callId = ?",
+            (str(call_id),),
+        ).fetchone()
+        if row:
+            return dict(row)
+
+    return msg_json.get("callHistoryDetails")
+
+
+def build_call_item(
+    ids: IdAllocator,
+    msg_row: dict,
+    msg_json: dict,
+    conn: sqlite3.Connection,
+    has_calls_table: bool,
+) -> Frame | None:
+    """Build a ChatItem frame for a call-history message."""
+    conv_id = msg_row["conversationId"]
+    chat_id = ids.conversation_to_chat.get(conv_id)
+    if chat_id is None:
+        return None
+
+    call_info = _get_call_info(msg_json, conn, has_calls_table)
+    if not call_info:
+        return None
+
+    frame = Frame()
+    item = frame.chatItem
+    item.chatId = chat_id
+    item.dateSent = msg_row.get("sent_at") or msg_row.get("timestamp") or 0
+    item.authorId = ids.service_id_to_recipient.get("__self__", 0)
+    item.directionless.CopyFrom(ChatItem.DirectionlessMessageDetails())
+
+    mode = call_info.get("mode", "Direct")
+
+    if mode == "Direct":
+        call = IndividualCall()
+        call_id = call_info.get("callId")
+        if call_id:
+            try:
+                call.callId = int(call_id)
+            except (ValueError, TypeError):
+                pass
+
+        call_type = call_info.get("type", "Audio")
+        call.type = 2 if call_type.lower().startswith("video") else 1
+
+        direction = call_info.get("direction", "Incoming")
+        call.direction = 2 if direction.lower() == "outgoing" else 1
+
+        status = (call_info.get("status") or "accepted").lower()
+        call.state = {"accepted": 1, "not-accepted": 2, "declined": 2,
+                      "missed": 3, "missed-notification-profile": 4}.get(status, 1)
+        call.startedCallTimestamp = int(call_info.get("timestamp", 0))
+        call.read = True
+
+        frame.chatItem.updateMessage.individualCall.CopyFrom(call)
+    else:
+        call = GroupCall()
+        call_id = call_info.get("callId")
+        if call_id:
+            try:
+                call.callId = int(call_id)
+            except (ValueError, TypeError):
+                pass
+
+        status = (call_info.get("status") or "generic").lower()
+        call.state = {"generic": 1, "joined": 2, "ringing": 3, "accepted": 4,
+                      "declined": 5, "missed": 6, "missed-notification-profile": 7,
+                      "outgoing-ring": 8}.get(status, 1)
+        call.startedCallTimestamp = int(call_info.get("timestamp", 0))
+
+        ringer_id = call_info.get("ringerId")
+        if ringer_id:
+            ringer_rid = _resolve_recipient_id(ids, ringer_id)
+            if ringer_rid:
+                call.ringerRecipientId = ringer_rid
+
+        call.read = True
+
+        frame.chatItem.updateMessage.groupCall.CopyFrom(call)
+
+    return frame
+
+
+def _has_table(conn: sqlite3.Connection, table_name: str) -> bool:
+    """Check if a table exists in the SQLite database."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _collect_legacy_attachments(conn: sqlite3.Connection) -> list[dict]:
+    """Parse attachment info from message JSON for older Desktop versions."""
+    messages = conn.execute("""
+        SELECT m.id, m.sent_at, m.json
+        FROM messages m
+        WHERE m.type IN ('incoming', 'outgoing')
+        AND m.json LIKE '%"attachments"%'
+        ORDER BY m.sent_at ASC
+    """).fetchall()
+
+    result = []
+    for msg in messages:
+        msg_json = json.loads(msg["json"] or "{}")
+        for att in msg_json.get("attachments", []):
+            path = att.get("path")
+            if not path:
+                continue
+            result.append({
+                "contentType": att.get("contentType"),
+                "path": path,
+                "size": att.get("size"),
+                "width": att.get("width"),
+                "height": att.get("height"),
+                "fileName": att.get("fileName"),
+                "plaintextHash": att.get("plaintextHash"),
+                "blurHash": att.get("blurHash"),
+                "caption": att.get("caption"),
+                "localKey": att.get("localKey"),
+                "sent_at": msg["sent_at"],
+            })
+
+    return result
 
 
 @dataclass
@@ -440,7 +638,7 @@ def map_desktop_to_frames(
         FROM conversations c
         INNER JOIN messages m ON m.conversationId = c.id
         WHERE c.type = 'private' AND (c.serviceId IS NOT NULL OR c.id = ?)
-        AND m.type IN ('incoming', 'outgoing')
+        AND m.type IN ('incoming', 'outgoing', 'call-history')
     """, (self_conv_id,)).fetchall()
 
     for conv_row in active_conversations:
@@ -452,13 +650,15 @@ def map_desktop_to_frames(
             stats["chats"] += 1
 
     # 6. Build chat items from messages (ordered by received timestamp)
+    has_calls_table = _has_table(conn, "callsHistory")
+
     messages = conn.execute("""
         SELECT m.id, m.body, m.type, m.sent_at, m.received_at, m.received_at_ms,
                m.timestamp, m.conversationId, m.sourceServiceId, m.serverTimestamp,
                m.readStatus, m.unidentifiedDeliveryReceived, m.expireTimer,
                m.expirationStartTimestamp, m.json
         FROM messages m
-        WHERE m.type IN ('incoming', 'outgoing')
+        WHERE m.type IN ('incoming', 'outgoing', 'call-history')
         ORDER BY m.received_at ASC, m.sent_at ASC
     """).fetchall()
 
@@ -466,9 +666,13 @@ def map_desktop_to_frames(
         msg_dict = dict(msg_row)
         msg_json = json.loads(msg_dict.get("json") or "{}")
 
-        chat_item_frame = build_chat_item(ids, msg_dict, msg_json)
-        if chat_item_frame:
-            frames.append(chat_item_frame)
+        if msg_dict.get("type") == "call-history":
+            result_frame = build_call_item(ids, msg_dict, msg_json, conn, has_calls_table)
+        else:
+            result_frame = build_chat_item(ids, msg_dict, msg_json)
+
+        if result_frame:
+            frames.append(result_frame)
             stats["messages"] += 1
         else:
             stats["skipped_messages"] += 1
@@ -476,19 +680,23 @@ def map_desktop_to_frames(
     # 7. Handle attachments (if output dir provided)
     if output_files_dir:
         output_files_dir.mkdir(parents=True, exist_ok=True)
-        attachments = conn.execute("""
-            SELECT ma.messageId, ma.contentType, ma.path, ma.size,
-                   ma.width, ma.height, ma.fileName, ma.plaintextHash,
-                   ma.blurHash, ma.caption, ma.localKey, m.sent_at
-            FROM message_attachments ma
-            JOIN messages m ON m.id = ma.messageId
-            WHERE ma.path IS NOT NULL
-            AND m.type IN ('incoming', 'outgoing')
-            ORDER BY m.sent_at ASC
-        """).fetchall()
 
-        for att_row in attachments:
-            att = dict(att_row)
+        if _has_table(conn, "message_attachments"):
+            attachments = conn.execute("""
+                SELECT ma.messageId, ma.contentType, ma.path, ma.size,
+                       ma.width, ma.height, ma.fileName, ma.plaintextHash,
+                       ma.blurHash, ma.caption, ma.localKey, m.sent_at
+                FROM message_attachments ma
+                JOIN messages m ON m.id = ma.messageId
+                WHERE ma.path IS NOT NULL
+                AND m.type IN ('incoming', 'outgoing')
+                ORDER BY m.sent_at ASC
+            """).fetchall()
+            attachments = [dict(r) for r in attachments]
+        else:
+            attachments = _collect_legacy_attachments(conn)
+
+        for att in attachments:
             src_path = attachments_dir / att["path"]
             if not src_path.exists():
                 continue

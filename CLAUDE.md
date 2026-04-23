@@ -21,7 +21,7 @@ uv run signal-ark inspect --help
 Proto bindings live in `signal_ark/proto/` (generated, not checked in fully). Regenerate from `proto/` sources:
 
 ```bash
-protoc -I=proto --python_out=signal_ark/proto proto/Backup.proto proto/LocalArchive.proto
+protoc -I=proto --python_out=signal_ark/proto proto/Backup.proto proto/LocalArchive.proto proto/V1Backup.proto
 ```
 
 ### Tests
@@ -55,7 +55,10 @@ All derivation constants are date-prefixed strings (e.g. `"20241007_SIGNAL_BACKU
 - **decrypt.py** — Decrypt `main` file: detect legacy/modern format, verify HMAC, AES-256-CBC decrypt, gzip decompress, parse varint-delimited protobuf frames. Also has `_write_varint` used by encrypt.py.
 - **encrypt.py** — Reverse of decrypt: serialize frames → gzip → AES-CBC → HMAC. Also writes the files manifest and the complete backup directory.
 - **mapper.py** — The big one. Reads Desktop's SQLite DB and produces v2 `Frame` protobufs. Handles Recipients (self, contacts, groups), Chats, ChatItems (incoming/outgoing messages), and attachment encryption. Uses `IdAllocator` to map Desktop conversation IDs to backup recipient/chat IDs.
-- **cli.py** — Click CLI with three commands: `decrypt` (dump a backup as JSONL), `build` (produce a new backup from Desktop data + seed), `inspect` (validate a built backup — checks frame structure, cross-references manifest with content store, test-decrypts sample attachments).
+- **v1_decrypt.py** — v1 backup KDF and per-frame decryption. SHA-512 iterated 250K times → HKDF("Backup Export") → cipher_key + mac_key. Stateful `V1FrameDecryptor` with counter-bump AES-256-CTR, truncated HMAC verification.
+- **v1_parser.py** — Streaming v1 backup parser. Yields typed `V1ParsedFrame` objects (statements, preferences, attachments with inline data). `collect_v1_database()` replays SQL into in-memory SQLite.
+- **v1_to_v2.py** — Converts parsed v1 backup into v2 frames. Maps recipients (modern `recipient` table or legacy `recipient_preferences`), threads, sms/mms messages, and re-encrypts inline attachments.
+- **cli.py** — Click CLI with five commands: `decrypt`, `build`, `inspect`, `dump-v1` (dump v1 backup as JSONL), `import-v1` (convert v1 → v2 backup directory).
 
 ### Encryption envelope (used for main file and individual attachments; files manifest is unencrypted raw protobuf)
 
@@ -102,6 +105,8 @@ The `decrypt_desktop_attachment` function in `mapper.py` handles this decryption
 ## Reference material
 
 - **PLAN.md** — Full crypto spec, KDF test vectors, file format details, implementation phases
+- **docs/v1-backup-format.md** — v1 backup format specification (file layout, KDF chain, per-frame crypto)
 - **proto/Backup.proto** — Signal's v2 backup frame schema (from Signal-Android)
+- **proto/V1Backup.proto** — v1 backup frame schema (proto2, `signal_v1` package)
 - **proto/LocalArchive.proto** — Metadata and FilesFrame schemas
 - **Signal-Android-ref/**, **libsignal-ref/**, **molly-ref/** — Checked-out reference repos (not part of this project's code)

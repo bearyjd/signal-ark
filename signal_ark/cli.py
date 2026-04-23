@@ -300,6 +300,113 @@ def inspect(backup_dir: Path, passphrase: str, files_dir: Path | None) -> None:
         click.echo(f"\nNo issues found.")
 
 
+@main.command(name="dump-v1")
+@click.option("--v1-backup", required=True, type=click.Path(exists=True, path_type=Path),
+              help="Path to v1 .backup file")
+@click.option("--v1-passphrase", required=True, help="30-digit v1 backup passphrase")
+@click.option("--output", "-o", default="v1-dump", type=click.Path(path_type=Path),
+              help="Output directory for JSONL dump")
+def dump_v1(v1_backup: Path, v1_passphrase: str, output: Path) -> None:
+    """Decrypt and dump a v1 backup as JSONL for debugging."""
+    from google.protobuf.json_format import MessageToDict
+
+    from signal_ark.v1_parser import parse_v1_backup
+
+    output.mkdir(parents=True, exist_ok=True)
+    outfile = output / "v1-frames.jsonl"
+
+    count = 0
+    with open(outfile, "w") as f:
+        for parsed in parse_v1_backup(v1_backup, v1_passphrase):
+            d = MessageToDict(parsed.frame, preserving_proto_field_name=True)
+            d["_frame_type"] = parsed.frame_type.name
+            if parsed.attachment_data:
+                d["_attachment_size"] = len(parsed.attachment_data)
+            f.write(json.dumps(d) + "\n")
+            count += 1
+
+    click.echo(f"Dumped {count} frames to {outfile}")
+
+
+@main.command(name="import-v1")
+@click.option("--v1-backup", required=True, type=click.Path(exists=True, path_type=Path),
+              help="Path to v1 .backup file")
+@click.option("--v1-passphrase", required=True, help="30-digit v1 backup passphrase")
+@click.option("--seed-dir", required=True, type=click.Path(exists=True, path_type=Path),
+              help="v2 seed backup directory (provides AccountData)")
+@click.option("--passphrase", required=True, help="64-char AccountEntropyPool for output")
+@click.option("--self-aci", required=True, help="Your ACI UUID")
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path),
+              help="Output directory for rebuilt v2 backup")
+def import_v1(
+    v1_backup: Path,
+    v1_passphrase: str,
+    seed_dir: Path,
+    passphrase: str,
+    self_aci: str,
+    output: Path,
+) -> None:
+    """Convert a v1 backup to a v2 backup directory."""
+    from signal_ark.encrypt import write_backup_directory
+    from signal_ark.v1_to_v2 import convert_v1_to_v2
+
+    aep = validate_aep(passphrase)
+    backup_key = aep_to_backup_key(aep)
+    meta = decrypt_metadata(seed_dir / "metadata", backup_key)
+    hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
+
+    click.echo(f"BackupKey: {backup_key.hex()}")
+    click.echo(f"BackupId:  {meta.backup_id.hex()}")
+
+    seed_plaintext = decrypt_main((seed_dir / "main").read_bytes(), hmac_key, aes_key)
+    seed_result = parse_frames(seed_plaintext)
+    click.echo(f"Seed: {len(seed_result.frames)} frames")
+
+    seed_account_frame = None
+    for f in seed_result.frames:
+        if f.HasField("account"):
+            seed_account_frame = f
+            break
+
+    if seed_account_frame is None:
+        raise click.ClickException("No AccountData frame found in seed backup")
+
+    files_dir = output / "files"
+    click.echo("Converting v1 backup to v2 frames...")
+
+    def progress(stage: str, done: int, skipped: int) -> None:
+        click.echo(f"  [{stage}] processed={done} skipped={skipped}")
+
+    result = convert_v1_to_v2(
+        v1_path=v1_backup,
+        v1_passphrase=v1_passphrase,
+        seed_backup_info=seed_result.backup_info,
+        seed_account_frame=seed_account_frame,
+        self_aci=self_aci,
+        output_files_dir=files_dir,
+        progress_callback=progress,
+    )
+
+    click.echo(f"Mapped: {result.stats}")
+
+    backup_dir = output / "signal-backup-rebuilt"
+    write_backup_directory(
+        output_dir=backup_dir,
+        backup_info=result.backup_info,
+        frames=result.frames,
+        hmac_key=hmac_key,
+        aes_key=aes_key,
+        backup_key=backup_key,
+        backup_id=meta.backup_id,
+        media_names=result.media_names,
+        version=meta.version,
+    )
+
+    click.echo(f"Wrote backup to {backup_dir}")
+    click.echo(f"Files content store: {files_dir} ({len(result.media_names)} entries)")
+    click.echo("Done. Push to phone and test restore.")
+
+
 @main.command()
 def tui() -> None:
     """Launch the interactive TUI wizard."""

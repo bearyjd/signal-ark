@@ -24,6 +24,8 @@ pip install .      # or with pip
 | `signal-ark decrypt` | Decrypt a v2 backup seed directory and dump frames as JSONL |
 | `signal-ark build` | Build a v2 backup from Desktop data + seed backup |
 | `signal-ark inspect` | Validate a built backup: frame structure, manifest, attachment decryption |
+| `signal-ark dump-v1` | Decrypt and dump a v1 `.backup` file as JSONL for debugging |
+| `signal-ark import-v1` | Convert a v1 backup to a v2 backup directory |
 | `signal-ark tui` | Launch the interactive TUI wizard (requires `[tui]` extra) |
 <!-- /AUTO-GENERATED:commands -->
 

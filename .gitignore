@@ -1,1 +1,10 @@
 __pycache__/
+work/
+
+# Third-party reference clones (separate git repos, not submodules)
+/Signal-Android-ref/
+/libsignal-ref/
+/molly-ref/
+
+# Local OMC/Claude session state
+.omc/

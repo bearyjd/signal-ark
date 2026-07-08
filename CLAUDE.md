@@ -34,6 +34,14 @@ uv run pytest -k roundtrip       # just round-trip tests
 
 KDF tests validate against libsignal's published test vectors (PLAN.md section 2). If these fail, nothing else will work.
 
+### Lint / type-check
+
+No `ruff`/`mypy` config exists yet. `mypy-protobuf` (dev dependency) only generates typed `.pyi` stubs during proto regeneration — it is not a project-wide type checker. There is currently no automated lint/type-check gate; run `uv run pytest` as the sole automated correctness signal until one is added (see `.agent_native/agent_roadmap.md`).
+
+## Agent-native audit
+
+`.agent_native/agent_roadmap.md` contains a prioritized audit of gaps that block an AI agent from autonomously reproducing, implementing, testing, and verifying a bug fix or feature end-to-end (missing synthetic-backup fixtures, missing CLI-level tests, structural entanglement in `mapper.py`, etc.). Consult it before starting non-trivial work — it flags what to build first for the biggest reduction in required human attention.
+
 ## Architecture
 
 ### Crypto pipeline (the core flow)
@@ -97,15 +105,40 @@ The `message_attachments` table only exists in newer Desktop versions. Older ver
 
 The `decrypt_desktop_attachment` function in `mapper.py` handles this decryption. `encrypt_attachment` accepts optional `desktop_local_key` and `plaintext_size` params to decrypt before re-encrypting for the backup.
 
+### Recipient mapping is duplicated across two paths — change both or neither
+
+There are **two independent implementations** of "conversation JSON → v2 Recipient frame":
+
+- `mapper.py`'s `build_contact_recipient` / `build_group_recipient` — used by the Desktop-DB → v2 `build` path.
+- `v1_to_v2.py`'s `_map_recipients_modern` / `_map_recipients_legacy` — used by the v1-backup → v2 `import-v1` path.
+
+They are not layered on top of each other. A bug or field-mapping fix in one (e.g. avatar color, profile name, group membership) very likely exists in the other and must be checked/fixed there too. There is no shared abstraction yet (tracked in `.agent_native/agent_roadmap.md` item 4) — until that lands, treat any recipient-mapping change as a two-file change.
+
+### Consulting the reference repos
+
+`Signal-Android-ref/`, `libsignal-ref/`, and `molly-ref/` are checked-out third-party clones for **source lookup only** — never edit them, never audit them as part of this project, and they have no bearing on this repo's own build/test/lint commands. Use them when the proto schema or a format detail is ambiguous:
+
+- **Proto field semantics unclear** (e.g. what a `FilePointer` variant means, how a field is actually populated/read) → grep the Kotlin/Java model and (de)serialization code in `Signal-Android-ref/` for the same field name.
+- **KDF/crypto constants, derivation order, or forward-secrecy-token behavior in question** → grep the Rust backup crate in `libsignal-ref/` — it's the canonical implementation this project ports from.
+- **Molly-specific restore behavior** (e.g. whether a field or directory layout differs from stock Signal Android) → check `molly-ref/`.
+
+Example: the "Backup directory layout on phone" open question below should be resolved by reading `Signal-Android-ref`'s backup-restore/import code for the expected `files/` path relative to the backup directory, rather than only guessing from this codebase.
+
 ## Open questions
 
 - **Backup directory layout on phone** — Does Signal Android expect `files/` as a sibling to the backup dir or inside it? Current code produces them as siblings under `output/`. Needs verification against a working restore.
 
 ## Reference material
 
+- **tests/helpers/synthetic_seed.py** — Builds a real, on-disk v2 seed-backup directory (`metadata` + `main`) via the production `encrypt.py`/`metadata.py` code paths, for repro/tests that need a seed dir without a real device backup. Import explicitly: `from tests.helpers.synthetic_seed import synthetic_seed_dir`.
 - **PLAN.md** — Full crypto spec, KDF test vectors, file format details, implementation phases
 - **docs/v1-backup-format.md** — v1 backup format specification (file layout, KDF chain, per-frame crypto)
 - **proto/Backup.proto** — Signal's v2 backup frame schema (from Signal-Android)
 - **proto/V1Backup.proto** — v1 backup frame schema (proto2, `signal_v1` package)
 - **proto/LocalArchive.proto** — Metadata and FilesFrame schemas
-- **Signal-Android-ref/**, **libsignal-ref/**, **molly-ref/** — Checked-out reference repos (not part of this project's code)
+- **Signal-Android-ref/**, **libsignal-ref/**, **molly-ref/** — Checked-out reference repos (not part of this project's code; see "Consulting the reference repos" above)
+- **.agent_native/agent_roadmap.md** — Prioritized gaps blocking autonomous agent bug-repro/implement/verify workflows
+
+## Privacy / real data handling
+
+`work/` holds **real, decrypted Signal backup data** (a real seed backup, decrypted Desktop SQLite databases, and built output containing real encrypted attachments) used for manual end-to-end verification against an actual device backup. It is gitignored — never remove it from `.gitignore`, never copy anything from it into `tests/`, fixtures, docs, or any other deliverable, and never run destructive operations against it without explicit instruction. All test fixtures must be synthetic (see `.agent_native/agent_roadmap.md` item 2 for the planned synthetic-seed-backup generator).

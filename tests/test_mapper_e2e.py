@@ -18,7 +18,7 @@ import pytest
 
 from signal_ark.encrypt import serialize_frames
 from signal_ark.mapper import MappingResult, map_desktop_to_frames
-from signal_ark.proto.Backup_pb2 import BackupInfo, Frame
+from signal_ark.proto.Backup_pb2 import BackupInfo, Frame, IndividualCall
 from signal_ark.validate import ValidationResult
 
 from tests.helpers.synthetic_seed import default_account_frame, default_backup_info
@@ -417,24 +417,24 @@ class TestMapDesktopToFramesE2E:
         audio_calls = [
             f for f in updates
             if f.chatItem.updateMessage.HasField("individualCall")
-            and f.chatItem.updateMessage.individualCall.type == 1  # AUDIO
+            and f.chatItem.updateMessage.individualCall.type == IndividualCall.Type.AUDIO_CALL
         ]
         assert len(audio_calls) == 1
         call = audio_calls[0].chatItem.updateMessage.individualCall
-        assert call.direction == 1  # INCOMING
-        assert call.state == 1  # ACCEPTED
+        assert call.direction == IndividualCall.Direction.INCOMING
+        assert call.state == IndividualCall.State.ACCEPTED
 
     def test_individual_video_call_missed(self) -> None:
         updates = _find_chat_items_with_update_message(self.frames)
         video_calls = [
             f for f in updates
             if f.chatItem.updateMessage.HasField("individualCall")
-            and f.chatItem.updateMessage.individualCall.type == 2  # VIDEO
+            and f.chatItem.updateMessage.individualCall.type == IndividualCall.Type.VIDEO_CALL
         ]
         assert len(video_calls) == 1
         call = video_calls[0].chatItem.updateMessage.individualCall
-        assert call.direction == 1  # INCOMING
-        assert call.state == 3  # MISSED
+        assert call.direction == IndividualCall.Direction.INCOMING
+        assert call.state == IndividualCall.State.MISSED
 
     def test_call_items_have_directionless(self) -> None:
         updates = _find_chat_items_with_update_message(self.frames)
@@ -555,21 +555,21 @@ class TestMapDesktopCallFallback:
 
     def test_legacy_declined_outgoing_video(self) -> None:
         call = self._call_by_id(99)
-        assert call.type == 2  # VIDEO
-        assert call.direction == 2  # OUTGOING
-        assert call.state == 2  # NOT_ACCEPTED
+        assert call.type == IndividualCall.Type.VIDEO_CALL
+        assert call.direction == IndividualCall.Direction.OUTGOING
+        assert call.state == IndividualCall.State.NOT_ACCEPTED
         assert call.startedCallTimestamp == 7050
 
     def test_legacy_missed_incoming_without_call_mode(self) -> None:
         call = self._call_by_id(100)
-        assert call.type == 1  # AUDIO
-        assert call.direction == 1  # INCOMING
-        assert call.state == 3  # MISSED
+        assert call.type == IndividualCall.Type.AUDIO_CALL
+        assert call.direction == IndividualCall.Direction.INCOMING
+        assert call.state == IndividualCall.State.MISSED
         assert call.startedCallTimestamp == 8000
 
     def test_legacy_accepted_incoming(self) -> None:
         call = self._call_by_id(101)
-        assert call.state == 1  # ACCEPTED
+        assert call.state == IndividualCall.State.ACCEPTED
         assert call.startedCallTimestamp == 9010
 
 
@@ -856,10 +856,16 @@ class TestMapDesktopModernAttachments:
             att.pointer.locatorInfo
             for f in _find_chat_items(result.frames)
             for att in f.chatItem.standardMessage.attachments
+        ] + [
+            f.chatItem.standardMessage.longText.locatorInfo
+            for f in _find_chat_items(result.frames)
+            if f.chatItem.standardMessage.HasField("longText")
         ]
         assert locators
-        for locator in locators:
-            media_name = hashlib.sha256(locator.plaintextHash + locator.localKey).hexdigest()
-            assert media_name in result.media_names
+        expected = {
+            hashlib.sha256(loc.plaintextHash + loc.localKey).hexdigest() for loc in locators
+        }
+        assert set(result.media_names) == expected
+        for media_name in expected:
             assert (self.output_dir / media_name[:2] / media_name).is_file()
 

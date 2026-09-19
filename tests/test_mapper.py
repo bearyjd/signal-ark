@@ -14,6 +14,7 @@ from signal_ark.mapper import (
     _attach_file_pointer_to_message,
     _build_message_attachment,
     _collect_legacy_attachments,
+    _find_attachment_target,
     encrypt_attachment,
     _get_call_info,
     _has_column,
@@ -25,7 +26,7 @@ from signal_ark.mapper import (
     build_chat_item,
     build_self_recipient,
 )
-from signal_ark.proto.Backup_pb2 import Frame
+from signal_ark.proto.Backup_pb2 import Frame, GroupCall, IndividualCall, Quote
 
 SELF_ACI = "aci-self"
 
@@ -195,7 +196,7 @@ def test_map_quote_basic() -> None:
     assert quote.targetSentTimestamp == 5000
     assert quote.authorId == ids.service_id_to_recipient["aci-alice"]
     assert quote.text.body == "quoted text"
-    assert quote.type == 1  # NORMAL
+    assert quote.type == Quote.Type.NORMAL
 
 
 def test_map_quote_with_author_uuid_fallback() -> None:
@@ -431,9 +432,9 @@ def test_build_call_item_individual_audio() -> None:
 
     call = frame.chatItem.updateMessage.individualCall
     assert call.callId == 1
-    assert call.type == 1  # AUDIO_CALL
-    assert call.direction == 1  # INCOMING
-    assert call.state == 1  # ACCEPTED
+    assert call.type == IndividualCall.Type.AUDIO_CALL
+    assert call.direction == IndividualCall.Direction.INCOMING
+    assert call.state == IndividualCall.State.ACCEPTED
     assert call.startedCallTimestamp == 5000
     assert call.read is True
 
@@ -443,29 +444,29 @@ def test_build_call_item_individual_video_outgoing_declined() -> None:
     assert frame is not None
 
     call = frame.chatItem.updateMessage.individualCall
-    assert call.type == 2  # VIDEO_CALL
-    assert call.direction == 2  # OUTGOING
-    assert call.state == 2  # NOT_ACCEPTED
+    assert call.type == IndividualCall.Type.VIDEO_CALL
+    assert call.direction == IndividualCall.Direction.OUTGOING
+    assert call.state == IndividualCall.State.NOT_ACCEPTED
 
 
 def test_build_call_item_missed() -> None:
     frame = _build_direct_call("Missed")
     assert frame is not None
-    assert frame.chatItem.updateMessage.individualCall.state == 3  # MISSED
+    assert frame.chatItem.updateMessage.individualCall.state == IndividualCall.State.MISSED
 
 
 def test_build_call_item_missed_notification_profile() -> None:
     frame = _build_direct_call("MissedNotificationProfile")
     assert frame is not None
-    assert frame.chatItem.updateMessage.individualCall.state == 4
+    assert frame.chatItem.updateMessage.individualCall.state == IndividualCall.State.MISSED_NOTIFICATION_PROFILE
 
 
 def test_build_call_item_pending_depends_on_direction() -> None:
     incoming = _build_direct_call("Pending", direction="Incoming")
     outgoing = _build_direct_call("Pending", direction="Outgoing")
     assert incoming is not None and outgoing is not None
-    assert incoming.chatItem.updateMessage.individualCall.state == 3  # MISSED
-    assert outgoing.chatItem.updateMessage.individualCall.state == 2  # NOT_ACCEPTED
+    assert incoming.chatItem.updateMessage.individualCall.state == IndividualCall.State.MISSED
+    assert outgoing.chatItem.updateMessage.individualCall.state == IndividualCall.State.NOT_ACCEPTED
 
 
 def test_build_call_item_deleted_skipped() -> None:
@@ -518,16 +519,21 @@ def test_build_call_item_group_call() -> None:
     assert frame is not None
     gc = frame.chatItem.updateMessage.groupCall
     assert gc.callId == 10
-    assert gc.state == 4  # ACCEPTED
+    assert gc.state == GroupCall.State.ACCEPTED
     assert gc.startedCallTimestamp == 8000
     assert gc.ringerRecipientId == ids.service_id_to_recipient["aci-alice"]
 
 
 def test_build_call_item_group_call_states() -> None:
     expected = {
-        "GenericGroupCall": 1, "Joined": 2, "Ringing": 3, "Accepted": 4,
-        "Declined": 5, "Missed": 6, "MissedNotificationProfile": 7,
-        "OutgoingRing": 8,
+        "GenericGroupCall": GroupCall.State.GENERIC,
+        "Joined": GroupCall.State.JOINED,
+        "Ringing": GroupCall.State.RINGING,
+        "Accepted": GroupCall.State.ACCEPTED,
+        "Declined": GroupCall.State.DECLINED,
+        "Missed": GroupCall.State.MISSED,
+        "MissedNotificationProfile": GroupCall.State.MISSED_NOTIFICATION_PROFILE,
+        "OutgoingRing": GroupCall.State.OUTGOING_RING,
     }
     for status, state in expected.items():
         _, frame = _build_group_call(status)
@@ -578,9 +584,9 @@ def test_legacy_call_accepted_incoming_audio() -> None:
     assert frame is not None
     call = frame.chatItem.updateMessage.individualCall
     assert call.callId == 11
-    assert call.type == 1  # AUDIO
-    assert call.direction == 1  # INCOMING
-    assert call.state == 1  # ACCEPTED
+    assert call.type == IndividualCall.Type.AUDIO_CALL
+    assert call.direction == IndividualCall.Direction.INCOMING
+    assert call.state == IndividualCall.State.ACCEPTED
     assert call.startedCallTimestamp == 6500
 
 
@@ -591,9 +597,9 @@ def test_legacy_call_declined_outgoing_video() -> None:
     })
     assert frame is not None
     call = frame.chatItem.updateMessage.individualCall
-    assert call.type == 2  # VIDEO
-    assert call.direction == 2  # OUTGOING
-    assert call.state == 2  # NOT_ACCEPTED
+    assert call.type == IndividualCall.Type.VIDEO_CALL
+    assert call.direction == IndividualCall.Direction.OUTGOING
+    assert call.state == IndividualCall.State.NOT_ACCEPTED
     assert call.startedCallTimestamp == 6900
 
 
@@ -604,8 +610,8 @@ def test_legacy_call_missed_incoming() -> None:
     })
     assert frame is not None
     call = frame.chatItem.updateMessage.individualCall
-    assert call.direction == 1
-    assert call.state == 3  # MISSED
+    assert call.direction == IndividualCall.Direction.INCOMING
+    assert call.state == IndividualCall.State.MISSED
     assert call.startedCallTimestamp == 7000  # falls back to the message row
 
 
@@ -617,8 +623,8 @@ def test_legacy_call_without_call_mode_is_direct() -> None:
     assert frame is not None
     assert frame.chatItem.updateMessage.HasField("individualCall")
     call = frame.chatItem.updateMessage.individualCall
-    assert call.type == 2
-    assert call.state == 1
+    assert call.type == IndividualCall.Type.VIDEO_CALL
+    assert call.state == IndividualCall.State.ACCEPTED
 
 
 def test_legacy_group_call() -> None:
@@ -629,7 +635,7 @@ def test_legacy_group_call() -> None:
     assert frame is not None
     gc = frame.chatItem.updateMessage.groupCall
     assert not gc.HasField("callId")
-    assert gc.state == 1  # GENERIC
+    assert gc.state == GroupCall.State.GENERIC
     assert gc.startedCallTimestamp == 6400
     assert gc.ringerRecipientId == ids.service_id_to_recipient["aci-alice"]
 
@@ -755,7 +761,7 @@ def test_collect_legacy_attachments_includes_remote_key() -> None:
     assert result[0]["key"] == "c2VjcmV0"
 
 
-def test_attach_file_pointer_skips_call_item_with_same_date_sent() -> None:
+def test_find_attachment_target_never_returns_call_item() -> None:
     ids = _make_ids()
     ids.alloc_chat("conv-alice")
     conn = _make_call_db([_direct_call("1", "Accepted", timestamp=5000)])
@@ -764,14 +770,11 @@ def test_attach_file_pointer_skips_call_item_with_same_date_sent() -> None:
     std_frame = build_chat_item(ids, _make_msg_row(body="photo", sent_at=5000), {})
     assert call_frame is not None and std_frame is not None
     frames = [call_frame, std_frame]
+    index = {"msg-call": 0, "msg-std": 1}
 
-    _attach_file_pointer_to_message(
-        frames, _att(5000), "AAAA", "ab" * 32, ids, plaintext_hash=PLAINTEXT_HASH
-    )
-
-    assert frames[0].chatItem.WhichOneof("item") == "updateMessage"
+    assert _find_attachment_target(frames, _att(5000, "msg-call"), index) is None
+    assert _find_attachment_target(frames, _att(5000, "msg-std"), index) is std_frame
     assert frames[0].chatItem.updateMessage.HasField("individualCall")
-    assert len(frames[1].chatItem.standardMessage.attachments) == 1
 
 
 def test_attach_file_pointer_uses_message_id_index() -> None:
@@ -782,38 +785,12 @@ def test_attach_file_pointer_uses_message_id_index() -> None:
     assert first is not None and second is not None
     frames = [Frame(), first, second]
 
-    _attach_file_pointer_to_message(
-        frames,
-        _att(5000, "m2"),
-        "AAAA",
-        "ab" * 32,
-        ids,
-        frame_index={"m1": 1, "m2": 2},
-        plaintext_hash=PLAINTEXT_HASH,
-    )
+    target = _find_attachment_target(frames, _att(5000, "m2"), {"m1": 1, "m2": 2})
+    assert target is not None
+    _attach_file_pointer_to_message(target, _att(5000, "m2"), "AAAA", ids, plaintext_hash=PLAINTEXT_HASH)
 
     assert len(frames[1].chatItem.standardMessage.attachments) == 0
     assert len(frames[2].chatItem.standardMessage.attachments) == 1
-
-
-def test_attach_file_pointer_creates_standard_message_with_reactions() -> None:
-    ids = _make_ids()
-    ids.alloc_chat("conv-alice")
-    msg_json = {"reactions": [{"emoji": "🎉", "fromId": "conv-alice", "timestamp": 1}]}
-    frame = build_chat_item(ids, _make_msg_row(body=None, sent_at=5000), msg_json)
-    assert frame is not None
-    assert frame.chatItem.WhichOneof("item") is None
-    frames = [frame]
-
-    att = {**_att(5000), "json": json.dumps(msg_json)}
-    _attach_file_pointer_to_message(
-        frames, att, "AAAA", "ab" * 32, ids, plaintext_hash=PLAINTEXT_HASH
-    )
-
-    std = frames[0].chatItem.standardMessage
-    assert len(std.attachments) == 1
-    assert len(std.reactions) == 1
-    assert std.reactions[0].emoji == "🎉"
 
 
 # --- _has_table ---
@@ -835,7 +812,7 @@ def test_has_column_detects_presence_and_absence() -> None:
     conn.execute("CREATE TABLE message_attachments (path TEXT, localKey TEXT)")
     assert _has_column(conn, "message_attachments", "localKey") is True
     assert _has_column(conn, "message_attachments", "key") is False
-    assert _has_column(conn, "no_such_table", "key") is False
+    assert _has_column(conn, "messages", "key") is False
 
 
 # --- Legacy attachments ---

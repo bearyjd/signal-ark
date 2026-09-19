@@ -3,7 +3,9 @@
 // stream: a varint-length-delimited BackupInfo followed by varint-length-
 // delimited Frames (exactly what signal_ark.encrypt.serialize_frames emits).
 //
-// Usage: node validate.mjs <plaintext-file> [--purpose remote-backup|device-transfer]
+// Usage: node validate.mjs [<plaintext-file>] [--purpose remote-backup|device-transfer]
+// Without a file argument the stream is read from stdin (what signal_ark.validate
+// does, so decrypted data never touches disk).
 // Prints exactly one JSON line to stdout. Exit 0 = ok, 1 = validation failed,
 // 2 = usage / IO error.
 
@@ -59,14 +61,16 @@ function splitMessages(buf) {
     if (end > buf.length) {
       throw new Error(`Truncated message: expected ${header.value} bytes at ${header.next}`);
     }
-    if (header.value > 0) messages.push(buf.subarray(header.next, end));
+    messages.push(buf.subarray(header.next, end));
     offset = end;
   }
 }
 
+const STDIN_FD = 0;
+
 /**
  * @param {string[]} argv
- * @returns {{ file: string, purpose: number }}
+ * @returns {{ file: string | null, purpose: number }} file null means stdin
  */
 function parseArgs(argv) {
   let file = null;
@@ -81,10 +85,17 @@ function parseArgs(argv) {
       throw new Error(`Unexpected argument: ${argv[i]}`);
     }
   }
-  if (file === null) throw new Error('Usage: validate.mjs <plaintext-file> [--purpose remote-backup|device-transfer]');
   const purpose = PURPOSES[purposeName];
   if (purpose === undefined) throw new Error(`Unknown purpose: ${purposeName}`);
   return { file, purpose };
+}
+
+/**
+ * @param {string | null} file
+ * @returns {Uint8Array}
+ */
+function readStream(file) {
+  return new Uint8Array(readFileSync(file === null ? STDIN_FD : file));
 }
 
 /**
@@ -120,8 +131,7 @@ function runValidator(messages, purpose) {
 function run(argv) {
   try {
     const { file, purpose } = parseArgs(argv);
-    const buf = new Uint8Array(readFileSync(file));
-    const result = runValidator(splitMessages(buf), purpose);
+    const result = runValidator(splitMessages(readStream(file)), purpose);
     return { result, exitCode: result.ok ? EXIT_OK : EXIT_INVALID };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

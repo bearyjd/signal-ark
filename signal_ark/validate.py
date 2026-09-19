@@ -1,8 +1,9 @@
 """Gate backup frame streams through libsignal's official validator.
 
 Python owns all crypto: `validate_backup_dir` decrypts with the existing KDF
-chain and hands only plaintext to `tools/validator/validate.mjs`, a thin Node
-wrapper around `@signalapp/libsignal-client`'s `OnlineBackupValidator`.
+chain and pipes only plaintext, over stdin, to `tools/validator/validate.mjs`,
+a thin Node wrapper around `@signalapp/libsignal-client`'s
+`OnlineBackupValidator`. Decrypted data never touches disk.
 """
 
 from __future__ import annotations
@@ -10,7 +11,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,14 +66,20 @@ def validator_available() -> bool:
     return _unavailable_reason() is None
 
 
-def _run_validator(plaintext_path: Path, purpose: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [NODE_BINARY, str(VALIDATOR_SCRIPT), str(plaintext_path), "--purpose", purpose],
-        capture_output=True,
-        text=True,
-        timeout=VALIDATOR_TIMEOUT_SECONDS,
-        check=False,
-    )
+def _run_validator(plaintext: bytes, purpose: str) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(
+            [NODE_BINARY, str(VALIDATOR_SCRIPT), "--purpose", purpose],
+            input=plaintext,
+            capture_output=True,
+            timeout=VALIDATOR_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValidatorError(
+            f"validator timed out after {VALIDATOR_TIMEOUT_SECONDS}s "
+            f"({len(plaintext)} plaintext bytes)"
+        ) from exc
 
 
 def _parse_result_line(stdout: str) -> dict[str, object] | None:
@@ -87,12 +93,14 @@ def _parse_result_line(stdout: str) -> dict[str, object] | None:
     return None
 
 
-def _to_result(proc: subprocess.CompletedProcess[str]) -> ValidationResult:
-    parsed = _parse_result_line(proc.stdout) if proc.returncode in (EXIT_OK, EXIT_INVALID) else None
+def _to_result(proc: subprocess.CompletedProcess[bytes]) -> ValidationResult:
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    parsed = _parse_result_line(stdout) if proc.returncode in (EXIT_OK, EXIT_INVALID) else None
     if parsed is None:
+        stderr = proc.stderr.decode("utf-8", errors="replace")
         raise ValidatorError(
             f"validator exited with {proc.returncode} and no result line.\n"
-            f"stdout: {proc.stdout.strip()}\nstderr: {proc.stderr.strip()}"
+            f"stdout: {stdout.strip()}\nstderr: {stderr.strip()}"
         )
     error = parsed.get("error")
     return ValidationResult(
@@ -107,11 +115,7 @@ def validate_plaintext(plaintext: bytes, purpose: str = DEFAULT_PURPOSE) -> Vali
     if reason is not None:
         raise ValidatorUnavailable(reason)
 
-    with tempfile.NamedTemporaryFile(suffix=".plaintext") as handle:
-        handle.write(plaintext)
-        handle.flush()
-        proc = _run_validator(Path(handle.name), purpose)
-    return _to_result(proc)
+    return _to_result(_run_validator(plaintext, purpose))
 
 
 def validate_backup_dir(

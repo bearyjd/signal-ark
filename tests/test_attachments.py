@@ -66,7 +66,7 @@ def test_encrypt_attachment_with_desktop_decryption(tmp_path: Path) -> None:
     )
 
     assert result is not None
-    local_key_b64, media_name = result
+    local_key_b64, media_name = result.local_key_b64, result.media_name
 
     import base64
     backup_key = base64.b64decode(local_key_b64)
@@ -107,7 +107,7 @@ def test_encrypt_attachment_plaintext_file(tmp_path: Path) -> None:
     result = encrypt_attachment(src, output_dir)
 
     assert result is not None
-    local_key_b64, media_name = result
+    local_key_b64, media_name = result.local_key_b64, result.media_name
 
     expected_hash = hashlib.sha256(original).digest()
     import base64

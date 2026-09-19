@@ -128,20 +128,20 @@ See [v2 Backup Format Specification](docs/v2-backup-format.md) for a complete de
 | Content | Status |
 |---------|--------|
 | 1:1 text messages | Supported |
-| Group text messages | Supported |
+| Group text messages | Not yet (chats are only built for 1:1 conversations) |
 | Image/video/file attachments | Supported |
 | Contact profiles | Supported |
 | Conversation metadata | Supported |
-| Reactions, quotes | Not yet |
-| Call history | Not yet |
+| Reactions, quotes | Supported |
+| Call history | Supported (1:1 calls; group calls pending group chat support) |
 | Stickers | Passed through from seed |
 | Disappearing messages config | Supported |
 
 ## Known Issues
 
 - **Molly**: Blocked by [Issue #733](https://github.com/nickeito/molly/issues/733) — StorageSyncJob runs before restore completes. Use Signal Android until fixed.
-- **Older Desktop versions**: Schema differs (JSON blobs vs separate tables). The mapper targets the current Desktop schema with `message_attachments` table.
-- **Attachments without plaintextHash**: ~1% of attachments may lack this field; media name derivation falls back to file hash (correct for unencrypted files, wrong for encrypted).
+- **Older Desktop versions**: The mapper auto-detects whether the `message_attachments` table exists and falls back to parsing attachment metadata from message JSON blobs.
+- **Attachment hashes**: The mapper decrypts and hashes every attachment itself, so media names never depend on Desktop's recorded `plaintextHash`. When the DB value disagrees with the computed hash, it is counted in the `plaintext_hash_mismatch` stat rather than trusted.
 
 ## Credits
 

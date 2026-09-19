@@ -33,6 +33,10 @@ from signal_ark.proto.Backup_pb2 import AccountData, BackupInfo, Frame
 # synthetic passphrase, not derived from any real account.
 DEFAULT_AEP = "0123456789abcdefghijklmnopqrstuv" * 2
 DEFAULT_ACI = "00000000-0000-4000-8000-000000000001"
+# libsignal's validator requires exactly 32 bytes; the value itself is arbitrary.
+DEFAULT_MEDIA_ROOT_BACKUP_KEY = bytes(range(32))
+DEFAULT_SELF_RECIPIENT_ID = 1
+DEFAULT_BACKUP_TIME_MS = 1_700_000_000_000
 
 
 @dataclass(frozen=True)
@@ -47,13 +51,23 @@ class SyntheticSeed:
 
 
 def default_account_frame(**overrides: object) -> Frame:
-    """A minimal valid AccountData frame; pass field overrides to customize."""
+    """A minimal AccountData frame that libsignal's validator accepts.
+
+    The enum settings below default to UNKNOWN (0) in proto3, which the
+    validator rejects — so they are set explicitly. Pass field overrides to
+    customize.
+    """
     account = AccountData()
     account.givenName = str(overrides.pop("givenName", "Synthetic"))
     account.familyName = str(overrides.pop("familyName", "Seed"))
     account.avatarUrlPath = str(overrides.pop("avatarUrlPath", ""))
-    account.accountSettings.readReceipts = bool(overrides.pop("readReceipts", True))
-    account.accountSettings.linkPreviews = bool(overrides.pop("linkPreviews", True))
+    settings = account.accountSettings
+    settings.readReceipts = bool(overrides.pop("readReceipts", True))
+    settings.linkPreviews = bool(overrides.pop("linkPreviews", True))
+    settings.phoneNumberSharingMode = AccountData.PhoneNumberSharingMode.EVERYBODY
+    settings.defaultSentMediaQuality = AccountData.SentMediaQuality.STANDARD
+    settings.appTheme = AccountData.AppTheme.SYSTEM
+    settings.callsUseLessDataSetting = AccountData.CallsUseLessDataSetting.NEVER
     if not overrides.pop("no_profile_key", False):
         account.profileKey = os.urandom(32)
     if overrides:
@@ -64,6 +78,32 @@ def default_account_frame(**overrides: object) -> Frame:
     return frame
 
 
+def default_self_recipient_frame(recipient_id: int = DEFAULT_SELF_RECIPIENT_ID) -> Frame:
+    """The Self recipient frame every valid backup must contain exactly once."""
+    frame = Frame()
+    frame.recipient.id = recipient_id
+    frame.recipient.self.SetInParent()
+    return frame
+
+
+def default_backup_info(
+    version: int = 1,
+    backup_time_ms: int = DEFAULT_BACKUP_TIME_MS,
+    media_root_backup_key: bytes = DEFAULT_MEDIA_ROOT_BACKUP_KEY,
+) -> BackupInfo:
+    """A BackupInfo header that libsignal's validator accepts."""
+    info = BackupInfo()
+    info.version = version
+    info.backupTimeMs = backup_time_ms
+    info.mediaRootBackupKey = media_root_backup_key
+    return info
+
+
+def default_seed_frames() -> list[Frame]:
+    """The smallest frame list libsignal's validator accepts as a backup."""
+    return [default_account_frame(), default_self_recipient_frame()]
+
+
 def synthetic_seed_dir(
     tmp_path: Path,
     *,
@@ -71,13 +111,14 @@ def synthetic_seed_dir(
     aci: str = DEFAULT_ACI,
     frames: list[Frame] | None = None,
     version: int = 1,
-    backup_time_ms: int = 1_700_000_000_000,
+    backup_time_ms: int = DEFAULT_BACKUP_TIME_MS,
 ) -> SyntheticSeed:
     """Write a real v2 seed-backup directory (metadata + main) to tmp_path.
 
-    `frames` defaults to a single valid AccountData frame. Pass `frames=[]`
-    (or frames missing an `account` field) to build edge-case fixtures, e.g.
-    a seed with no AccountData frame at all.
+    `frames` defaults to `default_seed_frames()` (AccountData + Self
+    recipient), which passes libsignal's validator. Pass `frames=[]` (or
+    frames missing an `account` field) to build edge-case fixtures, e.g. a
+    seed with no AccountData frame at all.
 
     Returns a `SyntheticSeed` whose `.dir` can be fed straight into
     `signal-ark decrypt --seed-dir ...` or `signal_ark.decrypt.decrypt_main`
@@ -89,11 +130,9 @@ def synthetic_seed_dir(
     hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, backup_id)
 
     if frames is None:
-        frames = [default_account_frame()]
+        frames = default_seed_frames()
 
-    backup_info = BackupInfo()
-    backup_info.version = version
-    backup_info.backupTimeMs = backup_time_ms
+    backup_info = default_backup_info(version=version, backup_time_ms=backup_time_ms)
 
     output_dir = tmp_path / "seed"
     write_backup_directory(

@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import os
 import sqlite3
+from pathlib import Path
 
 from signal_ark.mapper import (
     IdAllocator,
     _attach_file_pointer_to_message,
+    _build_message_attachment,
     _collect_legacy_attachments,
+    encrypt_attachment,
     _get_call_info,
+    _has_column,
     _has_table,
     _map_quote,
     _map_reactions,
@@ -641,11 +648,111 @@ def test_legacy_group_call_started_time_fallback() -> None:
 # --- _attach_file_pointer_to_message ---
 
 
+PLAINTEXT_HASH = hashlib.sha256(b"attachment bytes").digest()
+
+
 def _att(sent_at: int, message_id: str | None = None) -> dict:
     att = {"contentType": "image/jpeg", "fileName": "p.jpg", "size": 3, "sent_at": sent_at}
     if message_id is not None:
         att["messageId"] = message_id
     return att
+
+
+# --- FilePointer locator integrity (libsignal requires plaintextHash + key) ---
+
+
+def test_build_message_attachment_sets_plaintext_hash_and_key() -> None:
+    ma = _build_message_attachment(_att(5000), "AAAA", PLAINTEXT_HASH)
+
+    locator = ma.pointer.locatorInfo
+    assert locator.plaintextHash == PLAINTEXT_HASH
+    assert locator.WhichOneof("integrityCheck") == "plaintextHash"
+    assert len(locator.key) == 64
+    assert locator.localKey == base64.b64decode("AAAA")
+
+
+def test_build_message_attachment_preserves_desktop_remote_key() -> None:
+    remote_key = os.urandom(64)
+    att = {**_att(5000), "key": base64.b64encode(remote_key).decode()}
+
+    ma = _build_message_attachment(att, "AAAA", PLAINTEXT_HASH)
+
+    assert ma.pointer.locatorInfo.key == remote_key
+
+
+def test_build_message_attachment_falls_back_when_desktop_key_wrong_length() -> None:
+    att = {**_att(5000), "key": base64.b64encode(os.urandom(32)).decode()}
+
+    ma = _build_message_attachment(att, "AAAA", PLAINTEXT_HASH)
+
+    assert len(ma.pointer.locatorInfo.key) == 64
+    assert ma.pointer.locatorInfo.key != base64.b64decode(att["key"])
+
+
+def test_build_message_attachment_falls_back_when_desktop_key_malformed() -> None:
+    att = {**_att(5000), "key": "not base64!!"}
+
+    ma = _build_message_attachment(att, "AAAA", PLAINTEXT_HASH)
+
+    assert len(ma.pointer.locatorInfo.key) == 64
+
+
+def test_encrypt_attachment_computed_hash_wins_over_disagreeing_db_hash(tmp_path: Path) -> None:
+    src = tmp_path / "plain.bin"
+    src.write_bytes(b"attachment bytes")
+
+    result = encrypt_attachment(src, tmp_path / "out", db_plaintext_hash="ab" * 32)
+
+    assert result is not None
+    assert result.plaintext_hash == PLAINTEXT_HASH
+    assert result.plaintext_hash_mismatch is True
+    local_key = base64.b64decode(result.local_key_b64)
+    assert result.media_name == hashlib.sha256(PLAINTEXT_HASH + local_key).hexdigest()
+
+
+def test_encrypt_attachment_agreeing_db_hash_is_not_a_mismatch(tmp_path: Path) -> None:
+    src = tmp_path / "plain.bin"
+    src.write_bytes(b"attachment bytes")
+
+    result = encrypt_attachment(src, tmp_path / "out", db_plaintext_hash=PLAINTEXT_HASH.hex())
+
+    assert result is not None
+    assert result.plaintext_hash_mismatch is False
+
+
+def test_encrypt_attachment_malformed_db_hash_does_not_raise(tmp_path: Path) -> None:
+    src = tmp_path / "plain.bin"
+    src.write_bytes(b"attachment bytes")
+
+    result = encrypt_attachment(src, tmp_path / "out", db_plaintext_hash="not-hex")
+
+    assert result is not None
+    assert result.plaintext_hash == PLAINTEXT_HASH
+    assert result.plaintext_hash_mismatch is True
+
+
+def test_encrypt_attachment_returns_plaintext_hash_used_for_media_name(tmp_path: Path) -> None:
+    src = tmp_path / "plain.bin"
+    src.write_bytes(b"attachment bytes")
+
+    result = encrypt_attachment(src, tmp_path / "out")
+
+    assert result is not None
+    assert result.plaintext_hash == PLAINTEXT_HASH
+    local_key = base64.b64decode(result.local_key_b64)
+    assert result.media_name == hashlib.sha256(PLAINTEXT_HASH + local_key).hexdigest()
+
+
+def test_collect_legacy_attachments_includes_remote_key() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE messages (id TEXT, type TEXT, sent_at INTEGER, json TEXT)")
+    att_json = json.dumps({"attachments": [{"path": "ab/f.jpg", "key": "c2VjcmV0"}]})
+    conn.execute("INSERT INTO messages VALUES (?, ?, ?, ?)", ("m1", "incoming", 1000, att_json))
+
+    result = _collect_legacy_attachments(conn)
+
+    assert result[0]["key"] == "c2VjcmV0"
 
 
 def test_attach_file_pointer_skips_call_item_with_same_date_sent() -> None:
@@ -658,7 +765,9 @@ def test_attach_file_pointer_skips_call_item_with_same_date_sent() -> None:
     assert call_frame is not None and std_frame is not None
     frames = [call_frame, std_frame]
 
-    _attach_file_pointer_to_message(frames, _att(5000), "AAAA", "ab" * 32, ids)
+    _attach_file_pointer_to_message(
+        frames, _att(5000), "AAAA", "ab" * 32, ids, plaintext_hash=PLAINTEXT_HASH
+    )
 
     assert frames[0].chatItem.WhichOneof("item") == "updateMessage"
     assert frames[0].chatItem.updateMessage.HasField("individualCall")
@@ -674,7 +783,13 @@ def test_attach_file_pointer_uses_message_id_index() -> None:
     frames = [Frame(), first, second]
 
     _attach_file_pointer_to_message(
-        frames, _att(5000, "m2"), "AAAA", "ab" * 32, ids, frame_index={"m1": 1, "m2": 2}
+        frames,
+        _att(5000, "m2"),
+        "AAAA",
+        "ab" * 32,
+        ids,
+        frame_index={"m1": 1, "m2": 2},
+        plaintext_hash=PLAINTEXT_HASH,
     )
 
     assert len(frames[1].chatItem.standardMessage.attachments) == 0
@@ -691,7 +806,9 @@ def test_attach_file_pointer_creates_standard_message_with_reactions() -> None:
     frames = [frame]
 
     att = {**_att(5000), "json": json.dumps(msg_json)}
-    _attach_file_pointer_to_message(frames, att, "AAAA", "ab" * 32, ids)
+    _attach_file_pointer_to_message(
+        frames, att, "AAAA", "ab" * 32, ids, plaintext_hash=PLAINTEXT_HASH
+    )
 
     std = frames[0].chatItem.standardMessage
     assert len(std.attachments) == 1
@@ -711,6 +828,14 @@ def test_has_table_exists() -> None:
 def test_has_table_missing() -> None:
     conn = sqlite3.connect(":memory:")
     assert _has_table(conn, "nonexistent") is False
+
+
+def test_has_column_detects_presence_and_absence() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE message_attachments (path TEXT, localKey TEXT)")
+    assert _has_column(conn, "message_attachments", "localKey") is True
+    assert _has_column(conn, "message_attachments", "key") is False
+    assert _has_column(conn, "no_such_table", "key") is False
 
 
 # --- Legacy attachments ---

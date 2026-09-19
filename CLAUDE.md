@@ -34,6 +34,12 @@ uv run pytest -k roundtrip       # just round-trip tests
 
 KDF tests validate against libsignal's published test vectors (PLAN.md section 2). If these fail, nothing else will work.
 
+```bash
+npm ci --prefix tools/validator   # one-time: installs libsignal's official backup validator (needs Node and npm)
+```
+
+Tests marked `validator` run every mapper/seed frame stream through libsignal's `OnlineBackupValidator` (`signal_ark/validate.py` → `tools/validator/validate.mjs`; Python does all crypto, Node only sees plaintext). They **skip** when Node or `tools/validator/node_modules` is missing; set `SIGNAL_ARK_REQUIRE_VALIDATOR=1` (CI) to make that a hard failure instead.
+
 ### Lint / type-check
 
 No `ruff`/`mypy` config exists yet. `mypy-protobuf` (dev dependency) only generates typed `.pyi` stubs during proto regeneration — it is not a project-wide type checker. There is currently no automated lint/type-check gate; run `uv run pytest` as the sole automated correctness signal until one is added (see `.agent_native/agent_roadmap.md`).

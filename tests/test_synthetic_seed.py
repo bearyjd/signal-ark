@@ -6,8 +6,10 @@ previously impossible to build without a real device backup.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from signal_ark.cli import main as cli_main
@@ -15,8 +17,18 @@ from signal_ark.decrypt import decrypt_main, parse_frames
 from signal_ark.kdf import backup_key_to_message_backup_key
 from signal_ark.metadata import decrypt_metadata
 from signal_ark.proto.Backup_pb2 import Frame
+from signal_ark.validate import ValidationResult
 
-from tests.helpers.synthetic_seed import default_account_frame, synthetic_seed_dir
+from tests.helpers.synthetic_seed import (
+    SyntheticSeed,
+    default_account_frame,
+    synthetic_seed_dir,
+)
+
+
+def _decrypt_seed_plaintext(seed: SyntheticSeed) -> bytes:
+    hmac_key, aes_key = backup_key_to_message_backup_key(seed.backup_key, seed.backup_id)
+    return decrypt_main((seed.dir / "main").read_bytes(), hmac_key, aes_key)
 
 
 def test_synthetic_seed_roundtrips_through_decrypt(tmp_path: Path) -> None:
@@ -25,14 +37,24 @@ def test_synthetic_seed_roundtrips_through_decrypt(tmp_path: Path) -> None:
     meta = decrypt_metadata(seed.dir / "metadata", seed.backup_key)
     assert meta.backup_id == seed.backup_id
 
-    hmac_key, aes_key = backup_key_to_message_backup_key(seed.backup_key, seed.backup_id)
-    plaintext = decrypt_main((seed.dir / "main").read_bytes(), hmac_key, aes_key)
-    result = parse_frames(plaintext)
+    result = parse_frames(_decrypt_seed_plaintext(seed))
 
     assert result.backup_info.version == 1
-    assert len(result.frames) == 1
+    assert len(result.frames) == 2
     assert result.frames[0].account.givenName == "Synthetic"
     assert result.frames[0].account.familyName == "Seed"
+    assert result.frames[1].recipient.HasField("self")
+
+
+@pytest.mark.validator
+def test_synthetic_seed_plaintext_passes_libsignal_validator(
+    tmp_path: Path, validator: Callable[..., ValidationResult]
+) -> None:
+    seed = synthetic_seed_dir(tmp_path)
+
+    result = validator(_decrypt_seed_plaintext(seed))
+
+    assert result.ok, result.error
 
 
 def test_synthetic_seed_custom_frames_and_aci(tmp_path: Path) -> None:
@@ -42,9 +64,7 @@ def test_synthetic_seed_custom_frames_and_aci(tmp_path: Path) -> None:
     seed = synthetic_seed_dir(tmp_path, aci=custom_aci, frames=[frame])
 
     assert seed.aci == custom_aci
-    hmac_key, aes_key = backup_key_to_message_backup_key(seed.backup_key, seed.backup_id)
-    plaintext = decrypt_main((seed.dir / "main").read_bytes(), hmac_key, aes_key)
-    result = parse_frames(plaintext)
+    result = parse_frames(_decrypt_seed_plaintext(seed))
 
     assert result.frames[0].account.givenName == "Alice"
     assert result.frames[0].account.familyName == "Example"

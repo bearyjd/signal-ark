@@ -6,13 +6,22 @@ reactions, quotes, call history (individual + group), and legacy attachments.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import sqlite3
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
-from signal_ark.mapper import map_desktop_to_frames
-from signal_ark.proto.Backup_pb2 import AccountData, BackupInfo, Frame
+import pytest
+
+from signal_ark.encrypt import serialize_frames
+from signal_ark.mapper import MappingResult, map_desktop_to_frames
+from signal_ark.proto.Backup_pb2 import BackupInfo, Frame
+from signal_ark.validate import ValidationResult
+
+from tests.helpers.synthetic_seed import default_account_frame, default_backup_info
 
 SELF_ACI = "aaaaaaaa-1111-2222-3333-444444444444"
 ALICE_ACI = "bbbbbbbb-1111-2222-3333-444444444444"
@@ -20,22 +29,17 @@ BOB_ACI = "cccccccc-1111-2222-3333-444444444444"
 
 
 def _seed_backup_info() -> BackupInfo:
-    info = BackupInfo()
-    info.version = 1
-    info.backupTimeMs = 1000000
-    return info
+    return default_backup_info(backup_time_ms=1000000)
 
 
 def _seed_account_frame() -> Frame:
-    frame = Frame()
-    account = AccountData()
-    account.givenName = "Test"
-    account.familyName = "User"
-    account.avatarUrlPath = ""
-    account.accountSettings.readReceipts = True
-    account.accountSettings.linkPreviews = True
-    frame.account.CopyFrom(account)
-    return frame
+    return default_account_frame(givenName="Test", familyName="User")
+
+
+def _assert_validates(validator: Callable[..., ValidationResult], result: MappingResult) -> None:
+    outcome = validator(serialize_frames(result.backup_info, result.frames))
+    assert outcome.ok, f"libsignal validator rejected mapper output: {outcome.error}"
+    assert outcome.frames == len(result.frames)
 
 
 def _create_desktop_db(db_path: Path, *, include_calls_table: bool = True) -> None:
@@ -265,10 +269,17 @@ class TestMapDesktopToFramesE2E:
             self_aci=SELF_ACI,
             output_files_dir=None,
         )
+        self.result = result
         self.frames = result.frames
         self.stats = result.stats
 
     # --- Structural ---
+
+    @pytest.mark.validator
+    def test_frames_pass_libsignal_validator(
+        self, validator: Callable[..., ValidationResult]
+    ) -> None:
+        _assert_validates(validator, self.result)
 
     def test_first_frame_is_account_data(self) -> None:
         assert self.frames[0].WhichOneof("item") == "account"
@@ -523,6 +534,7 @@ class TestMapDesktopCallFallback:
             seed_frames=[],
             self_aci=SELF_ACI,
         )
+        self.result = result
         self.frames = result.frames
 
     def _call_by_id(self, call_id: int):
@@ -531,6 +543,12 @@ class TestMapDesktopCallFallback:
             f.chatItem.updateMessage.individualCall for f in updates
             if f.chatItem.updateMessage.individualCall.callId == call_id
         )
+
+    @pytest.mark.validator
+    def test_frames_pass_libsignal_validator(
+        self, validator: Callable[..., ValidationResult]
+    ) -> None:
+        _assert_validates(validator, self.result)
 
     def test_all_legacy_calls_emitted(self) -> None:
         assert len(_find_chat_items_with_update_message(self.frames)) == 3
@@ -616,8 +634,8 @@ class TestMapDesktopLegacyAttachments:
         att_path.parent.mkdir(parents=True)
         att_path.write_bytes(b"fake jpeg!!")
 
-    def test_legacy_attachment_encrypted(self) -> None:
-        result = map_desktop_to_frames(
+    def _map(self) -> MappingResult:
+        return map_desktop_to_frames(
             db_path=self.db_path,
             attachments_dir=self.attachments_dir,
             seed_backup_info=_seed_backup_info(),
@@ -626,8 +644,17 @@ class TestMapDesktopLegacyAttachments:
             self_aci=SELF_ACI,
             output_files_dir=self.output_dir,
         )
+
+    def test_legacy_attachment_encrypted(self) -> None:
+        result = self._map()
         assert result.stats["attachments"] >= 1
         assert len(result.media_names) >= 1
+
+    @pytest.mark.validator
+    def test_attachment_frames_pass_libsignal_validator(
+        self, validator: Callable[..., ValidationResult]
+    ) -> None:
+        _assert_validates(validator, self._map())
 
     def test_legacy_no_message_attachments_table(self) -> None:
         conn = sqlite3.connect(str(self.db_path))
@@ -650,17 +677,6 @@ class TestMapDesktopLegacyAttachments:
         )
         conn.commit()
         conn.close()
-
-    def _map(self):
-        return map_desktop_to_frames(
-            db_path=self.db_path,
-            attachments_dir=self.attachments_dir,
-            seed_backup_info=_seed_backup_info(),
-            seed_account_frame=_seed_account_frame(),
-            seed_frames=[],
-            self_aci=SELF_ACI,
-            output_files_dir=self.output_dir,
-        )
 
     def test_bodyless_message_with_missing_file_emits_no_chat_item(self) -> None:
         self._insert_bodyless_attachment_message("zz/missing.png")
@@ -685,3 +701,165 @@ class TestMapDesktopLegacyAttachments:
         assert len(item.standardMessage.attachments) == 1
         assert [r.emoji for r in item.standardMessage.reactions] == ["\U0001f44d"]
         assert result.stats["messages"] == 2
+
+    @pytest.mark.validator
+    def test_bodyless_attachment_with_reactions_passes_libsignal_validator(
+        self, validator: Callable[..., ValidationResult]
+    ) -> None:
+        att_path = self.attachments_dir / "zz" / "present.png"
+        att_path.parent.mkdir(parents=True)
+        att_path.write_bytes(b"png!")
+        reactions = {"reactions": [{"emoji": "\U0001f44d", "fromId": "conv-alice", "timestamp": 9100}]}
+        self._insert_bodyless_attachment_message("zz/present.png", reactions)
+
+        _assert_validates(validator, self._map())
+
+
+class TestMapDesktopModernAttachments:
+    """Test the message_attachments path (newer Desktop), with and without a `key` column."""
+
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self.db_path = Path(self._tmpdir) / "desktop.sqlite"
+        self.attachments_dir = Path(self._tmpdir) / "attachments"
+        self.attachments_dir.mkdir()
+        self.output_dir = Path(self._tmpdir) / "output_files"
+        self.remote_key_b64 = base64.b64encode(b"A" * 64).decode()
+
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("""
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY, json TEXT, active_at INTEGER, type TEXT,
+                e164 TEXT, serviceId TEXT, profileName TEXT, profileFamilyName TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY, body TEXT, type TEXT, sent_at INTEGER,
+                received_at INTEGER, received_at_ms INTEGER, timestamp INTEGER,
+                conversationId TEXT, sourceServiceId TEXT, serverTimestamp INTEGER,
+                readStatus INTEGER, unidentifiedDeliveryReceived INTEGER,
+                expireTimer INTEGER, expirationStartTimestamp INTEGER, json TEXT
+            )
+        """)
+        conn.execute(
+            "INSERT INTO conversations VALUES (?,?,?,?,?,?,?,?)",
+            ("conv-self", json.dumps({"serviceId": SELF_ACI}), 1000, "private", None, SELF_ACI, "Test", "User"),
+        )
+        alice_json = json.dumps({"serviceId": ALICE_ACI, "profileName": "Alice"})
+        conn.execute(
+            "INSERT INTO conversations VALUES (?,?,?,?,?,?,?,?)",
+            ("conv-alice", alice_json, 2000, "private", None, ALICE_ACI, "Alice", ""),
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("msg-att", "Modern photo", "incoming", 8000, 8000, 8000, 8000,
+             "conv-alice", ALICE_ACI, None, 1, 0, None, None, "{}"),
+        )
+        conn.commit()
+        conn.close()
+
+        att_path = self.attachments_dir / "ab" / "modern.jpg"
+        att_path.parent.mkdir(parents=True)
+        att_path.write_bytes(b"fake jpeg!!")
+
+    def _create_message_attachments(
+        self, *, with_key_column: bool, db_plaintext_hash: str | None = None
+    ) -> None:
+        key_column = ", key TEXT" if with_key_column else ""
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute(f"""
+            CREATE TABLE message_attachments (
+                messageId TEXT, contentType TEXT, path TEXT, size INTEGER,
+                width INTEGER, height INTEGER, fileName TEXT, plaintextHash TEXT,
+                blurHash TEXT, caption TEXT, localKey TEXT{key_column}
+            )
+        """)
+        columns = "messageId, contentType, path, size, fileName, plaintextHash"
+        values = ["msg-att", "image/jpeg", "ab/modern.jpg", 11, "photo.jpg", db_plaintext_hash]
+        if with_key_column:
+            columns += ", key"
+            values.append(self.remote_key_b64)
+        placeholders = ",".join("?" * len(values))
+        conn.execute(f"INSERT INTO message_attachments ({columns}) VALUES ({placeholders})", values)
+        conn.commit()
+        conn.close()
+
+    def _map(self) -> MappingResult:
+        return map_desktop_to_frames(
+            db_path=self.db_path,
+            attachments_dir=self.attachments_dir,
+            seed_backup_info=_seed_backup_info(),
+            seed_account_frame=_seed_account_frame(),
+            seed_frames=[],
+            self_aci=SELF_ACI,
+            output_files_dir=self.output_dir,
+        )
+
+    def _attachment_locator(self, result: MappingResult):
+        item = next(f.chatItem for f in _find_chat_items(result.frames) if f.chatItem.dateSent == 8000)
+        assert len(item.standardMessage.attachments) == 1
+        return item.standardMessage.attachments[0].pointer.locatorInfo
+
+    def test_key_column_preserved_as_remote_key(self) -> None:
+        self._create_message_attachments(with_key_column=True)
+        result = self._map()
+
+        locator = self._attachment_locator(result)
+        assert locator.key == b"A" * 64
+        assert len(locator.plaintextHash) == 32
+        assert result.stats["attachments"] == 1
+
+    def test_missing_key_column_generates_remote_key(self) -> None:
+        self._create_message_attachments(with_key_column=False)
+        result = self._map()
+
+        locator = self._attachment_locator(result)
+        assert len(locator.key) == 64
+        assert len(locator.plaintextHash) == 32
+        assert result.stats["attachments"] == 1
+
+    @pytest.mark.validator
+    @pytest.mark.parametrize("with_key_column", [True, False])
+    def test_modern_attachment_frames_pass_libsignal_validator(
+        self, validator: Callable[..., ValidationResult], with_key_column: bool
+    ) -> None:
+        self._create_message_attachments(with_key_column=with_key_column)
+
+        _assert_validates(validator, self._map())
+
+    def test_disagreeing_db_plaintext_hash_loses_to_file_hash(self) -> None:
+        self._create_message_attachments(with_key_column=True, db_plaintext_hash="ab" * 32)
+        result = self._map()
+
+        locator = self._attachment_locator(result)
+        assert locator.plaintextHash == hashlib.sha256(b"fake jpeg!!").digest()
+        assert result.stats["plaintext_hash_mismatch"] == 1
+
+    def test_agreeing_db_plaintext_hash_is_not_a_mismatch(self) -> None:
+        file_hash = hashlib.sha256(b"fake jpeg!!").hexdigest()
+        self._create_message_attachments(with_key_column=True, db_plaintext_hash=file_hash)
+        result = self._map()
+
+        assert self._attachment_locator(result).plaintextHash == bytes.fromhex(file_hash)
+        assert result.stats["plaintext_hash_mismatch"] == 0
+
+    @pytest.mark.validator
+    def test_every_file_pointer_maps_to_an_encrypted_file_on_disk(
+        self, validator: Callable[..., ValidationResult]
+    ) -> None:
+        self._create_message_attachments(with_key_column=True)
+        result = self._map()
+        _assert_validates(validator, result)
+
+        locators = [
+            att.pointer.locatorInfo
+            for f in _find_chat_items(result.frames)
+            for att in f.chatItem.standardMessage.attachments
+        ]
+        assert locators
+        for locator in locators:
+            media_name = hashlib.sha256(locator.plaintextHash + locator.localKey).hexdigest()
+            assert media_name in result.media_names
+            assert (self.output_dir / media_name[:2] / media_name).is_file()
+

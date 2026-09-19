@@ -20,6 +20,11 @@ signal-ark = "signal_ark.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.pytest.ini_options]
+markers = [
+    "validator: runs libsignal's backup validator (skipped unless tools/validator is installed)",
+]
+
 [dependency-groups]
 dev = [
     "mypy-protobuf>=5.0.0",

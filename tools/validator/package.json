@@ -1,0 +1,9 @@
+{
+  "name": "signal-ark-validator",
+  "private": true,
+  "type": "module",
+  "description": "Runs libsignal's official backup validator against a plaintext v2 frame stream",
+  "dependencies": {
+    "@signalapp/libsignal-client": "0.103.0"
+  }
+}

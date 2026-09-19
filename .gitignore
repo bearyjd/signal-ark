@@ -8,3 +8,6 @@ work/
 
 # Local OMC/Claude session state
 .omc/
+
+# libsignal validator gate (tools/validator) — run `npm ci --prefix tools/validator`
+tools/validator/node_modules/

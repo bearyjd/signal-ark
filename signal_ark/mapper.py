@@ -6,6 +6,7 @@ Reference: signalbackup-tools/signalbackup/importfromdesktop.cc
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 from signal_ark.proto.Backup_pb2 import (
     AccountData,
@@ -434,6 +436,7 @@ _GROUP_CALL_STATES = {
     "OutgoingRing": 8,
 }
 _CALL_STATUS_DELETED = "Deleted"
+_REMOTE_ATTACHMENT_KEY_SIZE = 64
 
 
 def _normalize_legacy_call(details: dict, msg_row: dict | None) -> dict:
@@ -594,6 +597,28 @@ def _has_table(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    """Check if a column exists on a table (Desktop schemas vary by version)."""
+    columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(col[1] == column_name for col in columns)
+
+
+def _collect_modern_attachments(conn: sqlite3.Connection) -> list[dict]:
+    """Read attachment rows from the message_attachments table (newer Desktop)."""
+    key_column = "ma.key" if _has_column(conn, "message_attachments", "key") else "NULL AS key"
+    rows = conn.execute(f"""
+        SELECT ma.messageId, ma.contentType, ma.path, ma.size,
+               ma.width, ma.height, ma.fileName, ma.plaintextHash,
+               ma.blurHash, ma.caption, ma.localKey, {key_column}, m.sent_at, m.json
+        FROM message_attachments ma
+        JOIN messages m ON m.id = ma.messageId
+        WHERE ma.path IS NOT NULL
+        AND m.type IN ('incoming', 'outgoing')
+        ORDER BY m.sent_at ASC
+    """).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _collect_legacy_attachments(conn: sqlite3.Connection) -> list[dict]:
     """Parse attachment info from message JSON for older Desktop versions."""
     messages = conn.execute("""
@@ -623,6 +648,7 @@ def _collect_legacy_attachments(conn: sqlite3.Connection) -> list[dict]:
                 "blurHash": att.get("blurHash"),
                 "caption": att.get("caption"),
                 "localKey": att.get("localKey"),
+                "key": att.get("key"),
                 "sent_at": msg["sent_at"],
                 "json": msg["json"],
             })
@@ -680,6 +706,7 @@ def map_desktop_to_frames(
         "messages": 0,
         "attachments": 0,
         "skipped_messages": 0,
+        "plaintext_hash_mismatch": 0,
     }
 
     # 1. AccountData (from seed — has correct registration)
@@ -800,17 +827,7 @@ def map_desktop_to_frames(
         output_files_dir.mkdir(parents=True, exist_ok=True)
 
         if _has_table(conn, "message_attachments"):
-            attachments = conn.execute("""
-                SELECT ma.messageId, ma.contentType, ma.path, ma.size,
-                       ma.width, ma.height, ma.fileName, ma.plaintextHash,
-                       ma.blurHash, ma.caption, ma.localKey, m.sent_at, m.json
-                FROM message_attachments ma
-                JOIN messages m ON m.id = ma.messageId
-                WHERE ma.path IS NOT NULL
-                AND m.type IN ('incoming', 'outgoing')
-                ORDER BY m.sent_at ASC
-            """).fetchall()
-            attachments = [dict(r) for r in attachments]
+            attachments = _collect_modern_attachments(conn)
         else:
             attachments = _collect_legacy_attachments(conn)
 
@@ -830,12 +847,19 @@ def map_desktop_to_frames(
                 plaintext_size=pt_size,
             )
             if result:
-                local_key_b64, media_name = result
-                media_names.append(media_name)
+                media_names.append(result.media_name)
                 stats["attachments"] += 1
+                if result.plaintext_hash_mismatch:
+                    stats["plaintext_hash_mismatch"] += 1
 
                 _attach_file_pointer_to_message(
-                    frames, att, local_key_b64, media_name, ids, message_frame_index
+                    frames,
+                    att,
+                    result.local_key_b64,
+                    result.media_name,
+                    ids,
+                    message_frame_index,
+                    plaintext_hash=result.plaintext_hash,
                 )
 
     conn.close()
@@ -899,20 +923,42 @@ def decrypt_desktop_attachment(
     return plaintext[:plaintext_size]
 
 
+class EncryptedAttachment(NamedTuple):
+    local_key_b64: str
+    media_name: str
+    plaintext_hash: bytes
+    plaintext_hash_mismatch: bool
+
+
+def _db_hash_disagrees(db_plaintext_hash: str | None, computed: bytes) -> bool:
+    """True when Desktop's recorded plaintextHash is absent-but-set, malformed,
+    or differs from the hash of the bytes actually read. The computed hash
+    always wins: it is what mediaName and the FilePointer must agree on."""
+    if not db_plaintext_hash:
+        return False
+    try:
+        return bytes.fromhex(db_plaintext_hash) != computed
+    except ValueError:
+        return True
+
+
 def encrypt_attachment(
     src_path: Path,
     output_files_dir: Path,
     db_plaintext_hash: str | None = None,
     desktop_local_key: bytes | None = None,
     plaintext_size: int | None = None,
-) -> tuple[str, str] | None:
+) -> EncryptedAttachment | None:
     """Encrypt an attachment file for the backup content store.
 
     If desktop_local_key and plaintext_size are provided, the file is first
     decrypted (Desktop stores attachments encrypted at rest) before
     re-encrypting for the backup.
 
-    Returns (localKey_base64, mediaName) or None on failure.
+    Returns the backup localKey, the mediaName, the plaintextHash the
+    mediaName was derived from (the FilePointer must carry the same hash),
+    and whether Desktop's recorded plaintextHash disagreed with it; or None
+    on failure.
     """
     from cryptography.hazmat.primitives import hashes, hmac, padding
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -931,10 +977,7 @@ def encrypt_attachment(
             return None
 
     plaintext_hash = hashlib.sha256(file_bytes).digest()
-    if db_plaintext_hash:
-        expected = bytes.fromhex(db_plaintext_hash)
-        if plaintext_hash != expected:
-            plaintext_hash = expected
+    hash_mismatch = _db_hash_disagrees(db_plaintext_hash, plaintext_hash)
 
     # Generate random 64-byte local key (32 AES + 32 HMAC)
     local_key = os.urandom(64)
@@ -967,7 +1010,7 @@ def encrypt_attachment(
     (shard_dir / media_name).write_bytes(encrypted)
 
     local_key_b64 = base64.b64encode(local_key).decode()
-    return local_key_b64, media_name
+    return EncryptedAttachment(local_key_b64, media_name, plaintext_hash, hash_mismatch)
 
 
 def _is_attachable_chat_item(frame: Frame) -> bool:
@@ -1000,7 +1043,28 @@ def _find_attachment_target(
     )
 
 
-def _build_message_attachment(att: dict, local_key_b64: str) -> MessageAttachment:
+def _remote_attachment_key(desktop_key_b64: str | None) -> bytes:
+    """Desktop's remote attachment key if it is well-formed and 64 bytes,
+    otherwise a fresh one (as Signal generates for a never-uploaded file)."""
+    try:
+        key = _b64_to_bytes(desktop_key_b64)
+    except (binascii.Error, ValueError):
+        key = b""
+    if len(key) == _REMOTE_ATTACHMENT_KEY_SIZE:
+        return key
+    return os.urandom(_REMOTE_ATTACHMENT_KEY_SIZE)
+
+
+def _build_message_attachment(
+    att: dict, local_key_b64: str, plaintext_hash: bytes
+) -> MessageAttachment:
+    """Build a MessageAttachment whose LocatorInfo libsignal accepts.
+
+    A LocatorInfo with a plaintextHash must also carry the 64-byte remote
+    attachment key (libsignal `LocatorError::MissingKey`); Desktop stores it
+    as base64 `key`, and a fresh one is generated when Desktop has none, as
+    Signal does for a never-uploaded attachment.
+    """
     ma = MessageAttachment()
     fp = ma.pointer
 
@@ -1018,9 +1082,9 @@ def _build_message_attachment(att: dict, local_key_b64: str) -> MessageAttachmen
         fp.blurHash = att["blurHash"]
     if att.get("size"):
         fp.locatorInfo.size = int(att["size"])
-    if att.get("plaintextHash"):
-        fp.locatorInfo.plaintextHash = bytes.fromhex(att["plaintextHash"])
 
+    fp.locatorInfo.plaintextHash = plaintext_hash
+    fp.locatorInfo.key = _remote_attachment_key(att.get("key"))
     fp.locatorInfo.localKey = _b64_to_bytes(local_key_b64)
     ma.wasDownloaded = True
     return ma
@@ -1033,6 +1097,8 @@ def _attach_file_pointer_to_message(
     media_name: str,
     ids: IdAllocator,
     frame_index: dict[str, int] | None = None,
+    *,
+    plaintext_hash: bytes,
 ) -> None:
     """Find the ChatItem frame for this attachment's message and add the FilePointer.
 
@@ -1050,5 +1116,5 @@ def _attach_file_pointer_to_message(
         frame.chatItem.standardMessage.CopyFrom(std_msg)
 
     frame.chatItem.standardMessage.attachments.append(
-        _build_message_attachment(att, local_key_b64)
+        _build_message_attachment(att, local_key_b64, plaintext_hash)
     )

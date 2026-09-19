@@ -524,8 +524,7 @@ def _map_mms_messages(
                 try:
                     result = encrypt_attachment(tmp_path, output_files_dir)
                     if result:
-                        _, media_name = result
-                        media_names.append(media_name)
+                        media_names.append(result.media_name)
                         stats["attachments"] += 1
                 finally:
                     tmp_path.unlink(missing_ok=True)

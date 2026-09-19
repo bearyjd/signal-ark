@@ -179,6 +179,29 @@ def _create_desktop_db(db_path: Path, *, include_calls_table: bool = True) -> No
          "conv-bob", None, None, 1, 0, None, None, msg6_json),
     )
 
+    # 7. Outgoing quoting our own earlier message
+    msg7_json = json.dumps({
+        "quote": {"id": 2000, "authorAci": SELF_ACI, "text": "Replying to you"},
+        "sendStateByConversationId": {
+            "conv-alice": {"status": "Sent", "updatedAt": 7050},
+        },
+    })
+    conn.execute(
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("msg-7", "Quoting myself", "outgoing", 7000, 7000, 7000, 7000,
+         "conv-alice", None, None, 1, 0, None, None, msg7_json),
+    )
+
+    # 8. Reaction-only message with no body and no attachments (must be dropped)
+    msg8_json = json.dumps({
+        "reactions": [{"emoji": "\U0001f525", "fromId": "conv-alice", "timestamp": 8100}],
+    })
+    conn.execute(
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("msg-8", None, "incoming", 8000, 8000, 8000, 8000,
+         "conv-alice", ALICE_ACI, None, 1, 0, None, None, msg8_json),
+    )
+
     # callsHistory table
     if include_calls_table:
         conn.execute("""
@@ -189,11 +212,11 @@ def _create_desktop_db(db_path: Path, *, include_calls_table: bool = True) -> No
         """)
         conn.execute(
             "INSERT INTO callsHistory VALUES (?,?,?,?,?,?,?,?)",
-            ("call-1", "conv-alice", None, "Direct", "Audio", "Incoming", "accepted", 4000),
+            ("call-1", "conv-alice", None, "Direct", "Audio", "Incoming", "Accepted", 4000),
         )
         conn.execute(
             "INSERT INTO callsHistory VALUES (?,?,?,?,?,?,?,?)",
-            ("call-2", "conv-bob", None, "Direct", "Video", "Incoming", "missed", 5000),
+            ("call-2", "conv-bob", None, "Direct", "Video", "Incoming", "Missed", 5000),
         )
 
     conn.commit()
@@ -261,7 +284,18 @@ class TestMapDesktopToFramesE2E:
     def test_stats_counts(self) -> None:
         assert self.stats["recipients"] >= 2
         assert self.stats["chats"] >= 2
-        assert self.stats["messages"] >= 4
+        assert self.stats["messages"] == 7
+        assert self.stats["skipped_messages"] == 1
+
+    def test_no_item_less_chat_items(self) -> None:
+        for f in _find_chat_items(self.frames):
+            assert f.chatItem.WhichOneof("item") is not None
+
+    def test_reaction_only_message_dropped(self) -> None:
+        assert not any(f.chatItem.dateSent == 8000 for f in _find_chat_items(self.frames))
+
+    def test_stats_messages_matches_emitted_chat_items(self) -> None:
+        assert self.stats["messages"] == len(_find_chat_items(self.frames))
 
     # --- Text messages ---
 
@@ -339,6 +373,19 @@ class TestMapDesktopToFramesE2E:
         assert quote.targetSentTimestamp == 3000
         assert quote.text.body == "Hey there"
         assert quote.authorId != 0
+
+    def test_quote_of_own_message_resolves_to_self_recipient(self) -> None:
+        std_msgs = _find_chat_items_with_standard_message(self.frames)
+        msg = next(
+            f for f in std_msgs
+            if f.chatItem.standardMessage.text.body == "Quoting myself"
+        )
+        self_rid = next(
+            f.recipient.id for f in _find_frames_by_type(self.frames, "recipient")
+            if f.recipient.HasField("self")
+        )
+        assert msg.chatItem.standardMessage.quote.authorId == self_rid
+        assert msg.chatItem.authorId == self_rid
 
     # --- Combined reactions + quote ---
 
@@ -420,20 +467,49 @@ class TestMapDesktopCallFallback:
             ("conv-alice", alice_json, 2000, "private", None, ALICE_ACI, "Alice", ""),
         )
 
-        msg_json = json.dumps({
+        declined_json = json.dumps({
             "callHistoryDetails": {
                 "callId": "99",
-                "mode": "Direct",
-                "type": "Video",
-                "direction": "Outgoing",
-                "status": "not-accepted",
-                "timestamp": 7000,
+                "callMode": "Direct",
+                "wasIncoming": False,
+                "wasVideoCall": True,
+                "wasDeclined": True,
+                "endedTime": 7050,
             }
         })
         conn.execute(
             "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("msg-call", None, "call-history", 7000, 7000, 7000, 7000,
-             "conv-alice", None, None, 1, 0, None, None, msg_json),
+            ("msg-call-declined", None, "call-history", 7000, 7000, 7000, 7000,
+             "conv-alice", None, None, 1, 0, None, None, declined_json),
+        )
+        missed_json = json.dumps({
+            "callHistoryDetails": {
+                "callId": "100",
+                "wasIncoming": True,
+                "wasVideoCall": False,
+                "wasDeclined": False,
+            }
+        })
+        conn.execute(
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("msg-call-missed", None, "call-history", 8000, 8000, 8000, 8000,
+             "conv-alice", None, None, 1, 0, None, None, missed_json),
+        )
+        accepted_json = json.dumps({
+            "callHistoryDetails": {
+                "callId": "101",
+                "callMode": "Direct",
+                "wasIncoming": True,
+                "wasVideoCall": False,
+                "wasDeclined": False,
+                "acceptedTime": 9010,
+                "endedTime": 9500,
+            }
+        })
+        conn.execute(
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("msg-call-accepted", None, "call-history", 9000, 9000, 9000, 9000,
+             "conv-alice", None, None, 1, 0, None, None, accepted_json),
         )
 
         conn.commit()
@@ -449,13 +525,34 @@ class TestMapDesktopCallFallback:
         )
         self.frames = result.frames
 
-    def test_call_from_json_fallback(self) -> None:
+    def _call_by_id(self, call_id: int):
         updates = _find_chat_items_with_update_message(self.frames)
-        assert len(updates) == 1
-        call = updates[0].chatItem.updateMessage.individualCall
+        return next(
+            f.chatItem.updateMessage.individualCall for f in updates
+            if f.chatItem.updateMessage.individualCall.callId == call_id
+        )
+
+    def test_all_legacy_calls_emitted(self) -> None:
+        assert len(_find_chat_items_with_update_message(self.frames)) == 3
+
+    def test_legacy_declined_outgoing_video(self) -> None:
+        call = self._call_by_id(99)
         assert call.type == 2  # VIDEO
         assert call.direction == 2  # OUTGOING
         assert call.state == 2  # NOT_ACCEPTED
+        assert call.startedCallTimestamp == 7050
+
+    def test_legacy_missed_incoming_without_call_mode(self) -> None:
+        call = self._call_by_id(100)
+        assert call.type == 1  # AUDIO
+        assert call.direction == 1  # INCOMING
+        assert call.state == 3  # MISSED
+        assert call.startedCallTimestamp == 8000
+
+    def test_legacy_accepted_incoming(self) -> None:
+        call = self._call_by_id(101)
+        assert call.state == 1  # ACCEPTED
+        assert call.startedCallTimestamp == 9010
 
 
 class TestMapDesktopLegacyAttachments:
@@ -539,3 +636,52 @@ class TestMapDesktopLegacyAttachments:
         ).fetchall()
         conn.close()
         assert len(tables) == 0
+
+    def _insert_bodyless_attachment_message(self, path: str, extra_json: dict | None = None) -> None:
+        conn = sqlite3.connect(str(self.db_path))
+        msg_json = json.dumps({
+            "attachments": [{"path": path, "contentType": "image/png", "size": 4}],
+            **(extra_json or {}),
+        })
+        conn.execute(
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("msg-bodyless", None, "incoming", 9000, 9000, 9000, 9000,
+             "conv-alice", ALICE_ACI, None, 1, 0, None, None, msg_json),
+        )
+        conn.commit()
+        conn.close()
+
+    def _map(self):
+        return map_desktop_to_frames(
+            db_path=self.db_path,
+            attachments_dir=self.attachments_dir,
+            seed_backup_info=_seed_backup_info(),
+            seed_account_frame=_seed_account_frame(),
+            seed_frames=[],
+            self_aci=SELF_ACI,
+            output_files_dir=self.output_dir,
+        )
+
+    def test_bodyless_message_with_missing_file_emits_no_chat_item(self) -> None:
+        self._insert_bodyless_attachment_message("zz/missing.png")
+        result = self._map()
+
+        chat_items = _find_chat_items(result.frames)
+        assert not any(f.chatItem.dateSent == 9000 for f in chat_items)
+        assert all(f.chatItem.WhichOneof("item") is not None for f in chat_items)
+        assert result.stats["messages"] == 1
+        assert result.stats["skipped_messages"] == 1
+
+    def test_bodyless_message_with_present_file_keeps_reactions(self) -> None:
+        att_path = self.attachments_dir / "zz" / "present.png"
+        att_path.parent.mkdir(parents=True)
+        att_path.write_bytes(b"png!")
+        reactions = {"reactions": [{"emoji": "\U0001f44d", "fromId": "conv-alice", "timestamp": 9100}]}
+        self._insert_bodyless_attachment_message("zz/present.png", reactions)
+        result = self._map()
+
+        item = next(f.chatItem for f in _find_chat_items(result.frames) if f.chatItem.dateSent == 9000)
+        assert item.WhichOneof("item") == "standardMessage"
+        assert len(item.standardMessage.attachments) == 1
+        assert [r.emoji for r in item.standardMessage.reactions] == ["\U0001f44d"]
+        assert result.stats["messages"] == 2

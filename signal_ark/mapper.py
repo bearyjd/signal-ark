@@ -88,9 +88,13 @@ def _map_reactions(msg_json: dict, ids: IdAllocator) -> list[Reaction]:
 
     result = []
     for r in reactions_data:
+        emoji = r.get("emoji")
+        author_id = _resolve_recipient_id(ids, r.get("fromId"))
+        if not emoji or not author_id:
+            continue
         reaction = Reaction()
-        reaction.emoji = r.get("emoji", "")
-        reaction.authorId = _resolve_recipient_id(ids, r.get("fromId"))
+        reaction.emoji = emoji
+        reaction.authorId = author_id
         reaction.sentTimestamp = r.get("timestamp", 0)
         reaction.sortOrder = r.get("receivedAtDate", r.get("timestamp", 0))
         result.append(reaction)
@@ -99,24 +103,41 @@ def _map_reactions(msg_json: dict, ids: IdAllocator) -> list[Reaction]:
 
 
 def _map_quote(msg_json: dict, ids: IdAllocator) -> Quote | None:
-    """Extract quote from Desktop message JSON."""
+    """Extract quote from Desktop message JSON.
+
+    Drops the quote when the author cannot be resolved or when it carries
+    neither text nor attachments (both are rejected by the backup validator).
+    """
     quote_data = msg_json.get("quote")
     if not quote_data:
         return None
 
+    author_id = _resolve_recipient_id(
+        ids, quote_data.get("authorAci") or quote_data.get("authorUuid")
+    )
+    if not author_id:
+        return None
+
     quote = Quote()
+    quote.authorId = author_id
 
     target_ts = quote_data.get("id")
-    if target_ts:
+    if target_ts and not quote_data.get("referencedMessageNotFound"):
         quote.targetSentTimestamp = int(target_ts)
-
-    author_id = quote_data.get("authorAci") or quote_data.get("authorUuid")
-    if author_id:
-        quote.authorId = _resolve_recipient_id(ids, author_id)
 
     text = quote_data.get("text")
     if text:
         quote.text.body = text
+
+    for att in quote_data.get("attachments") or []:
+        quoted = quote.attachments.add()
+        if att.get("contentType"):
+            quoted.contentType = att["contentType"]
+        if att.get("fileName"):
+            quoted.fileName = att["fileName"]
+
+    if not quote.HasField("text") and not quote.attachments:
+        return None
 
     quote.type = 1  # NORMAL
     return quote
@@ -129,9 +150,19 @@ def build_account_frame(seed_account: AccountData) -> Frame:
     return frame
 
 
-def build_self_recipient(ids: IdAllocator, self_conversation_id: str) -> Frame:
-    """Build the Self recipient frame."""
+def build_self_recipient(
+    ids: IdAllocator,
+    self_conversation_id: str,
+    self_aci: str | None = None,
+) -> Frame:
+    """Build the Self recipient frame.
+
+    Registers the recipient under both the "__self__" placeholder and the
+    real ACI so quotes/reactions authored by us resolve to this recipient.
+    """
     rid = ids.alloc_recipient(self_conversation_id, service_id="__self__")
+    if self_aci:
+        ids.service_id_to_recipient[self_aci] = rid
     frame = Frame()
     frame.recipient.id = rid
     frame.recipient.self.CopyFrom(SelfRecipient())
@@ -359,19 +390,18 @@ def build_chat_item(
                 ss.sent.sealedSender = False
             outgoing.sendStatus.append(ss)
 
-    # Message body, reactions, and quote
+    # Message body, reactions, and quote. Reactions alone don't make a valid
+    # StandardMessage; attachments may still be added later.
     body = msg_row.get("body")
-    reactions = _map_reactions(msg_json, ids)
     quote = _map_quote(msg_json, ids)
 
-    if body or reactions or quote:
+    if body or quote:
         std_msg = StandardMessage()
         if body:
             std_msg.text.body = body
         if quote:
             std_msg.quote.CopyFrom(quote)
-        for r in reactions:
-            std_msg.reactions.append(r)
+        std_msg.reactions.extend(_map_reactions(msg_json, ids))
         item.standardMessage.CopyFrom(std_msg)
 
     # Expiration
@@ -385,10 +415,66 @@ def build_chat_item(
     return frame
 
 
+_CALL_TYPES = {"Audio": 1, "Video": 2}
+_CALL_DIRECTIONS = {"Incoming": 1, "Outgoing": 2}
+_INDIVIDUAL_CALL_STATES = {
+    "Accepted": 1,
+    "Declined": 2,
+    "Missed": 3,
+    "MissedNotificationProfile": 4,
+}
+_GROUP_CALL_STATES = {
+    "GenericGroupCall": 1,
+    "Joined": 2,
+    "Ringing": 3,
+    "Accepted": 4,
+    "Declined": 5,
+    "Missed": 6,
+    "MissedNotificationProfile": 7,
+    "OutgoingRing": 8,
+}
+_CALL_STATUS_DELETED = "Deleted"
+
+
+def _normalize_legacy_call(details: dict, msg_row: dict | None) -> dict:
+    """Convert pre-callsHistory ``callHistoryDetails`` JSON into the modern
+    callsHistory row shape (mirrors Desktop migration 89-call-history)."""
+    sent_at = (msg_row or {}).get("sent_at") or (msg_row or {}).get("timestamp") or 0
+
+    if details.get("callMode") == "Group" or "startedTime" in details:
+        return {
+            "callId": details.get("callId"),
+            "mode": "Group",
+            "direction": "Incoming",
+            "status": "GenericGroupCall",
+            "timestamp": details.get("startedTime") or sent_at,
+            "ringerId": details.get("creatorUuid"),
+        }
+
+    accepted_time = details.get("acceptedTime")
+    if accepted_time is not None:
+        status = "Accepted"
+    elif details.get("wasDeclined"):
+        status = "Declined"
+    else:
+        status = "Missed"
+
+    return {
+        "callId": details.get("callId"),
+        "mode": "Direct",
+        "type": "Video" if details.get("wasVideoCall") else "Audio",
+        "direction": "Incoming" if details.get("wasIncoming") else "Outgoing",
+        "status": status,
+        "timestamp": accepted_time or details.get("endedTime") or sent_at,
+        "ringerId": None,
+    }
+
+
 def _get_call_info(
     msg_json: dict,
     conn: sqlite3.Connection,
     has_calls_table: bool,
+    msg_row: dict | None = None,
 ) -> dict | None:
     """Look up call details from callsHistory table or message JSON fallback."""
     call_id = msg_json.get("callId")
@@ -401,7 +487,58 @@ def _get_call_info(
         if row:
             return dict(row)
 
-    return msg_json.get("callHistoryDetails")
+    details = msg_json.get("callHistoryDetails")
+    if not details:
+        return None
+    return _normalize_legacy_call(details, msg_row)
+
+
+def _individual_call_state(status: str | None, direction: str | None) -> int:
+    if status == "Pending":
+        return 3 if direction == "Incoming" else 2
+    return _INDIVIDUAL_CALL_STATES.get(status or "", 0)
+
+
+def _set_call_id(call: IndividualCall | GroupCall, call_id: object) -> None:
+    if call_id is None or call_id == "":
+        return
+    try:
+        call.callId = int(call_id)
+    except (ValueError, TypeError):
+        pass
+
+
+def _build_individual_call(call_info: dict) -> IndividualCall | None:
+    direction = call_info.get("direction")
+    call_type = _CALL_TYPES.get(call_info.get("type") or "", 0)
+    call_direction = _CALL_DIRECTIONS.get(direction or "", 0)
+    state = _individual_call_state(call_info.get("status"), direction)
+    # libsignal's validator rejects UNKNOWN_* on all three fields
+    if not (call_type and call_direction and state):
+        return None
+    call = IndividualCall()
+    _set_call_id(call, call_info.get("callId"))
+    call.type = call_type
+    call.direction = call_direction
+    call.state = state
+    call.startedCallTimestamp = int(call_info.get("timestamp") or 0)
+    call.read = True
+    return call
+
+
+def _build_group_call(call_info: dict, ids: IdAllocator) -> GroupCall | None:
+    state = _GROUP_CALL_STATES.get(call_info.get("status") or "", 0)
+    if not state:
+        return None
+    call = GroupCall()
+    _set_call_id(call, call_info.get("callId"))
+    call.state = state
+    call.startedCallTimestamp = int(call_info.get("timestamp") or 0)
+    ringer_rid = _resolve_recipient_id(ids, call_info.get("ringerId"))
+    if ringer_rid:
+        call.ringerRecipientId = ringer_rid
+    call.read = True
+    return call
 
 
 def build_call_item(
@@ -417,8 +554,20 @@ def build_call_item(
     if chat_id is None:
         return None
 
-    call_info = _get_call_info(msg_json, conn, has_calls_table)
-    if not call_info:
+    call_info = _get_call_info(msg_json, conn, has_calls_table, msg_row)
+    if not call_info or call_info.get("status") == _CALL_STATUS_DELETED:
+        return None
+
+    mode = call_info.get("mode")
+    if mode not in ("Direct", "Group"):
+        return None
+
+    call = (
+        _build_individual_call(call_info)
+        if mode == "Direct"
+        else _build_group_call(call_info, ids)
+    )
+    if call is None:
         return None
 
     frame = Frame()
@@ -428,54 +577,10 @@ def build_call_item(
     item.authorId = ids.service_id_to_recipient.get("__self__", 0)
     item.directionless.CopyFrom(ChatItem.DirectionlessMessageDetails())
 
-    mode = call_info.get("mode", "Direct")
-
     if mode == "Direct":
-        call = IndividualCall()
-        call_id = call_info.get("callId")
-        if call_id:
-            try:
-                call.callId = int(call_id)
-            except (ValueError, TypeError):
-                pass
-
-        call_type = call_info.get("type", "Audio")
-        call.type = 2 if call_type.lower().startswith("video") else 1
-
-        direction = call_info.get("direction", "Incoming")
-        call.direction = 2 if direction.lower() == "outgoing" else 1
-
-        status = (call_info.get("status") or "accepted").lower()
-        call.state = {"accepted": 1, "not-accepted": 2, "declined": 2,
-                      "missed": 3, "missed-notification-profile": 4}.get(status, 1)
-        call.startedCallTimestamp = int(call_info.get("timestamp", 0))
-        call.read = True
-
-        frame.chatItem.updateMessage.individualCall.CopyFrom(call)
+        item.updateMessage.individualCall.CopyFrom(call)
     else:
-        call = GroupCall()
-        call_id = call_info.get("callId")
-        if call_id:
-            try:
-                call.callId = int(call_id)
-            except (ValueError, TypeError):
-                pass
-
-        status = (call_info.get("status") or "generic").lower()
-        call.state = {"generic": 1, "joined": 2, "ringing": 3, "accepted": 4,
-                      "declined": 5, "missed": 6, "missed-notification-profile": 7,
-                      "outgoing-ring": 8}.get(status, 1)
-        call.startedCallTimestamp = int(call_info.get("timestamp", 0))
-
-        ringer_id = call_info.get("ringerId")
-        if ringer_id:
-            ringer_rid = _resolve_recipient_id(ids, ringer_id)
-            if ringer_rid:
-                call.ringerRecipientId = ringer_rid
-
-        call.read = True
-
-        frame.chatItem.updateMessage.groupCall.CopyFrom(call)
+        item.updateMessage.groupCall.CopyFrom(call)
 
     return frame
 
@@ -507,6 +612,7 @@ def _collect_legacy_attachments(conn: sqlite3.Connection) -> list[dict]:
             if not path:
                 continue
             result.append({
+                "messageId": msg["id"],
                 "contentType": att.get("contentType"),
                 "path": path,
                 "size": att.get("size"),
@@ -518,9 +624,19 @@ def _collect_legacy_attachments(conn: sqlite3.Connection) -> list[dict]:
                 "caption": att.get("caption"),
                 "localKey": att.get("localKey"),
                 "sent_at": msg["sent_at"],
+                "json": msg["json"],
             })
 
     return result
+
+
+def _drop_empty_chat_items(frames: list[Frame]) -> tuple[list[Frame], int]:
+    """Return frames without item-less ChatItems, plus how many were dropped."""
+    kept = [
+        f for f in frames
+        if not (f.HasField("chatItem") and f.chatItem.WhichOneof("item") is None)
+    ]
+    return kept, len(frames) - len(kept)
 
 
 @dataclass
@@ -583,7 +699,7 @@ def map_desktop_to_frames(
         ).fetchone()
 
     self_conv_id = self_conv["id"] if self_conv else "__self_placeholder__"
-    frames.append(build_self_recipient(ids, self_conv_id))
+    frames.append(build_self_recipient(ids, self_conv_id, self_aci))
 
     # 2b. Carry over required seed frames (distribution lists, release notes, sticker packs)
     seed_chat_folders: list[Frame] = []
@@ -662,6 +778,7 @@ def map_desktop_to_frames(
         ORDER BY m.received_at ASC, m.sent_at ASC
     """).fetchall()
 
+    message_frame_index: dict[str, int] = {}
     for msg_row in messages:
         msg_dict = dict(msg_row)
         msg_json = json.loads(msg_dict.get("json") or "{}")
@@ -672,6 +789,7 @@ def map_desktop_to_frames(
             result_frame = build_chat_item(ids, msg_dict, msg_json)
 
         if result_frame:
+            message_frame_index[msg_dict["id"]] = len(frames)
             frames.append(result_frame)
             stats["messages"] += 1
         else:
@@ -685,7 +803,7 @@ def map_desktop_to_frames(
             attachments = conn.execute("""
                 SELECT ma.messageId, ma.contentType, ma.path, ma.size,
                        ma.width, ma.height, ma.fileName, ma.plaintextHash,
-                       ma.blurHash, ma.caption, ma.localKey, m.sent_at
+                       ma.blurHash, ma.caption, ma.localKey, m.sent_at, m.json
                 FROM message_attachments ma
                 JOIN messages m ON m.id = ma.messageId
                 WHERE ma.path IS NOT NULL
@@ -717,12 +835,18 @@ def map_desktop_to_frames(
                 stats["attachments"] += 1
 
                 _attach_file_pointer_to_message(
-                    frames, att, local_key_b64, media_name, ids
+                    frames, att, local_key_b64, media_name, ids, message_frame_index
                 )
 
     conn.close()
 
-    # 8. Append chat folders at the end (must come after recipients and chats)
+    # 8. Drop ChatItems that ended up with no content (no body, no quote,
+    # no attachment on disk) — an item-less ChatItem fails validation.
+    frames, dropped = _drop_empty_chat_items(frames)
+    stats["messages"] -= dropped
+    stats["skipped_messages"] += dropped
+
+    # 9. Append chat folders at the end (must come after recipients and chats)
     frames.extend(seed_chat_folders)
 
     # Use seed's BackupInfo with updated timestamp
@@ -846,51 +970,85 @@ def encrypt_attachment(
     return local_key_b64, media_name
 
 
+def _is_attachable_chat_item(frame: Frame) -> bool:
+    return (
+        frame.HasField("chatItem")
+        and frame.chatItem.WhichOneof("item") in (None, "standardMessage")
+    )
+
+
+def _find_attachment_target(
+    frames: list[Frame],
+    att: dict,
+    frame_index: dict[str, int] | None,
+) -> Frame | None:
+    """Locate the ChatItem an attachment belongs to: exact message id first,
+    then the first attachable item with a matching dateSent."""
+    idx = (frame_index or {}).get(att.get("messageId"))
+    if idx is not None and _is_attachable_chat_item(frames[idx]):
+        return frames[idx]
+
+    msg_sent_at = att.get("sent_at")
+    if not msg_sent_at:
+        return None
+    return next(
+        (
+            f for f in frames
+            if _is_attachable_chat_item(f) and f.chatItem.dateSent == msg_sent_at
+        ),
+        None,
+    )
+
+
+def _build_message_attachment(att: dict, local_key_b64: str) -> MessageAttachment:
+    ma = MessageAttachment()
+    fp = ma.pointer
+
+    if att.get("contentType"):
+        fp.contentType = att["contentType"]
+    if att.get("fileName"):
+        fp.fileName = att["fileName"]
+    if att.get("width"):
+        fp.width = int(att["width"])
+    if att.get("height"):
+        fp.height = int(att["height"])
+    if att.get("caption"):
+        fp.caption = att["caption"]
+    if att.get("blurHash"):
+        fp.blurHash = att["blurHash"]
+    if att.get("size"):
+        fp.locatorInfo.size = int(att["size"])
+    if att.get("plaintextHash"):
+        fp.locatorInfo.plaintextHash = bytes.fromhex(att["plaintextHash"])
+
+    fp.locatorInfo.localKey = _b64_to_bytes(local_key_b64)
+    ma.wasDownloaded = True
+    return ma
+
+
 def _attach_file_pointer_to_message(
     frames: list[Frame],
     att: dict,
     local_key_b64: str,
     media_name: str,
     ids: IdAllocator,
+    frame_index: dict[str, int] | None = None,
 ) -> None:
-    """Find the ChatItem frame for this attachment's message and add the FilePointer."""
-    msg_sent_at = att.get("sent_at")
-    if not msg_sent_at:
+    """Find the ChatItem frame for this attachment's message and add the FilePointer.
+
+    Call/update ChatItems are never touched. When the target has no
+    StandardMessage yet (body-less message), one is created carrying the
+    message's reactions, which build_chat_item had to leave out.
+    """
+    frame = _find_attachment_target(frames, att, frame_index)
+    if frame is None:
         return
 
-    for frame in frames:
-        if not frame.HasField("chatItem"):
-            continue
-        if frame.chatItem.dateSent != msg_sent_at:
-            continue
+    if not frame.chatItem.HasField("standardMessage"):
+        std_msg = StandardMessage()
+        std_msg.reactions.extend(_map_reactions(json.loads(att.get("json") or "{}"), ids))
+        frame.chatItem.standardMessage.CopyFrom(std_msg)
 
-        # Ensure it has a standardMessage
-        if not frame.chatItem.HasField("standardMessage"):
-            frame.chatItem.standardMessage.CopyFrom(StandardMessage())
-
-        ma = MessageAttachment()
-        fp = ma.pointer
-
-        if att.get("contentType"):
-            fp.contentType = att["contentType"]
-        if att.get("fileName"):
-            fp.fileName = att["fileName"]
-        if att.get("width"):
-            fp.width = int(att["width"])
-        if att.get("height"):
-            fp.height = int(att["height"])
-        if att.get("caption"):
-            fp.caption = att["caption"]
-        if att.get("blurHash"):
-            fp.blurHash = att["blurHash"]
-        if att.get("size"):
-            fp.locatorInfo.size = int(att["size"])
-        if att.get("plaintextHash"):
-            fp.locatorInfo.plaintextHash = bytes.fromhex(att["plaintextHash"])
-
-        fp.locatorInfo.localKey = _b64_to_bytes(local_key_b64)
-
-        ma.wasDownloaded = True
-
-        frame.chatItem.standardMessage.attachments.append(ma)
-        break
+    frame.chatItem.standardMessage.attachments.append(
+        _build_message_attachment(att, local_key_b64)
+    )

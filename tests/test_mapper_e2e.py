@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from signal_ark.encrypt import serialize_frames
-from signal_ark.mapper import MappingResult, map_desktop_to_frames
+from signal_ark.mapping import MappingResult, map_desktop_to_frames
 from signal_ark.proto.Backup_pb2 import BackupInfo, Frame, IndividualCall
 from signal_ark.validate import ValidationResult
 

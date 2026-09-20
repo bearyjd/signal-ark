@@ -70,7 +70,7 @@ def run_build(
     from signal_ark.decrypt import decrypt_main, parse_frames
     from signal_ark.encrypt import write_backup_directory
     from signal_ark.kdf import aep_to_backup_key, backup_key_to_message_backup_key, validate_aep
-    from signal_ark.mapper import map_desktop_to_frames
+    from signal_ark.mapping import map_desktop_to_frames
     from signal_ark.metadata import decrypt_metadata
 
     aep = validate_aep(state.passphrase)

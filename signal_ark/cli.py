@@ -112,7 +112,7 @@ def build(
 ) -> None:
     """Build a v2 backup from Desktop data + seed backup."""
     from signal_ark.encrypt import write_backup_directory
-    from signal_ark.mapper import map_desktop_to_frames
+    from signal_ark.mapping import map_desktop_to_frames
 
     aep = validate_aep(passphrase)
     backup_key = aep_to_backup_key(aep)

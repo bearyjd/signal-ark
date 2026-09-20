@@ -117,7 +117,8 @@ signal_ark/
 ├── metadata.py  — Metadata file encrypt/decrypt (BackupId in AES-256-CTR)
 ├── decrypt.py   — Main file decryption (AES-256-CBC + HMAC-SHA256, gzip, protobuf)
 ├── encrypt.py   — Main file encryption + backup directory writer
-├── mapper.py    — Desktop DB → v2 backup frame mapper + attachment encryption
+├── mapping/     — Desktop DB → v2 backup frame mapper (recipients, chats, calls, attachments, pipeline)
+├── validate.py  — libsignal backup validator bridge (see tools/validator)
 └── proto/       — Generated protobuf bindings (Backup.proto, LocalArchive.proto)
 ```
 

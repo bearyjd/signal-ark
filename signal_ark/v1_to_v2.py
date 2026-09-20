@@ -4,7 +4,7 @@ Parses a v1 .backup file, replays the SQL into an in-memory SQLite DB,
 maps recipients/chats/messages to v2 Frame protobufs, and re-encrypts
 attachments for the v2 content store.
 
-Reference: Signal-Android FullBackupImporter.java, mapper.py
+Reference: Signal-Android FullBackupImporter.java, mapping/recipients.py
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from signal_ark.mapper import IdAllocator, encrypt_attachment
+from signal_ark.mapping import IdAllocator, encrypt_attachment
 from signal_ark.proto.Backup_pb2 import (
     BackupInfo,
     Contact,

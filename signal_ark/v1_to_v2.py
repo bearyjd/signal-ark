@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from signal_ark.mapping import IdAllocator, encrypt_attachment
+from signal_ark.mapping.util import _normalize_aci, _uuid_str_to_bytes
 from signal_ark.proto.Backup_pb2 import (
     BackupInfo,
     Contact,
@@ -283,11 +284,9 @@ def _map_recipients_modern(
 
         contact = frame.recipient.contact
 
-        if aci:
-            try:
-                contact.aci = bytes.fromhex(aci.replace("-", ""))
-            except ValueError:
-                pass
+        canonical_aci = _normalize_aci(aci)
+        if canonical_aci:
+            contact.aci = _uuid_str_to_bytes(canonical_aci)
 
         if e164:
             e164_clean = e164.replace("+", "")

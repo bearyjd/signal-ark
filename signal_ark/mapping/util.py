@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import uuid
 
 # Body limits enforced by libsignal (message-backup/src/backup/chat/text.rs)
 MAX_BODY_BYTES = 128 * 1024
@@ -13,8 +14,18 @@ LONG_TEXT_CONTENT_TYPE = "text/x-signal-plain"
 
 
 def _uuid_str_to_bytes(uuid_str: str) -> bytes:
-    """Convert UUID string to 16 raw bytes."""
-    return bytes.fromhex(uuid_str.replace("-", ""))
+    """Convert UUID string to 16 raw bytes; raises ValueError on malformed input."""
+    return uuid.UUID(uuid_str).bytes
+
+
+def _normalize_aci(aci: str | None) -> str | None:
+    """Canonical lowercase-hyphenated spelling of an ACI, or None when malformed."""
+    if not aci:
+        return None
+    try:
+        return str(uuid.UUID(aci))
+    except ValueError:
+        return None
 
 
 def _b64_to_bytes(b64: str | None) -> bytes:

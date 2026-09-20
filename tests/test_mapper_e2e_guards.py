@@ -87,9 +87,12 @@ def _insert_attachment(
     conn.close()
 
 
-def _insert_group_conversation(db_path: Path, conv_id: str) -> None:
+def _insert_group_conversation(db_path: Path, conv_id: str, *, master_key: bool = True) -> None:
     conn = sqlite3.connect(str(db_path))
-    conv_json = json.dumps({"masterKey": base64.b64encode(b"k" * 32).decode(), "name": "G"})
+    conv: dict = {"name": "G"}
+    if master_key:
+        conv["masterKey"] = base64.b64encode(b"k" * 32).decode()
+    conv_json = json.dumps(conv)
     conn.execute(
         "INSERT INTO conversations VALUES (?,?,?,?,?,?,?,?)",
         (conv_id, conv_json, 5000, "group", None, None, None, None),
@@ -177,15 +180,16 @@ class TestMapperGuardsE2E:
 
     # --- M2 / M3 ---
 
-    def test_group_message_attachment_is_orphaned_not_written(self) -> None:
+    def test_keyless_group_message_attachment_is_orphaned_not_written(self) -> None:
         _create_message_attachments_table(self.db_path)
-        _insert_group_conversation(self.db_path, "conv-group")
+        _insert_group_conversation(self.db_path, "conv-group", master_key=False)
         _insert_message(self.db_path, "msg-grp", "group photo", 9500, {}, conv_id="conv-group")
         self._write_attachment("ab/group.jpg", b"group jpeg bytes")
         _insert_attachment(self.db_path, "msg-grp", "ab/group.jpg", 16)
 
         result = self._map()
 
+        assert result.stats["chats_without_recipient"] == 1
         assert result.stats["attachments_orphaned"] == 1
         assert result.stats["attachments"] == 0
         assert result.media_names == []

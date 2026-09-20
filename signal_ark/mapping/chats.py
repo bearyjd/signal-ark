@@ -10,6 +10,7 @@ from signal_ark.mapping.util import (
     _trim_utf8,
 )
 from signal_ark.proto.Backup_pb2 import (
+    ChatItem,
     Frame,
     Quote,
     Reaction,
@@ -108,14 +109,82 @@ def build_chat(ids: IdAllocator, conv_id: str, conv: dict) -> Frame | None:
     return frame
 
 
+def _resolve_incoming_author(ids: IdAllocator, conv_id: str, source_sid: str | None) -> int | None:
+    """Recipient ID for an incoming message's author.
+
+    Falls back to the conversation's own recipient for 1:1 chats; a group
+    recipient is never a valid author, so unresolved group authors yield None.
+    """
+    author_rid = ids.resolve_service_id(source_sid)
+    if author_rid is not None:
+        return author_rid
+    if conv_id in ids.group_conversations:
+        return None
+    return ids.conversation_to_recipient.get(conv_id, 0)
+
+
+def _fill_incoming(
+    item: ChatItem, ids: IdAllocator, msg_row: dict, stats: dict[str, int] | None
+) -> bool:
+    """Populate incoming details; False when the author cannot be attributed."""
+    author_rid = _resolve_incoming_author(ids, msg_row["conversationId"], msg_row.get("sourceServiceId"))
+    if author_rid is None:
+        if stats is not None:
+            stats["skipped_unresolved_author"] += 1
+        return False
+    item.authorId = author_rid
+
+    incoming = item.incoming
+    incoming.dateReceived = msg_row.get("received_at_ms") or msg_row.get("received_at") or 0
+    server_ts = msg_row.get("serverTimestamp")
+    if server_ts:
+        incoming.dateServerSent = server_ts
+    incoming.read = (msg_row.get("readStatus") or 0) >= 1
+    incoming.sealedSender = bool(msg_row.get("unidentifiedDeliveryReceived"))
+    return True
+
+
+def _map_send_status(dest_rid: int, state: dict) -> SendStatus:
+    ss = SendStatus()
+    ss.recipientId = dest_rid
+    ss.timestamp = state.get("updatedAt", 0)
+    status_str = state.get("status", "Sent")
+    if status_str == "Delivered":
+        ss.delivered.sealedSender = True
+    elif status_str == "Read":
+        ss.read.sealedSender = True
+    elif status_str == "Viewed":
+        ss.viewed.sealedSender = True
+    elif status_str == "Sent":
+        ss.sent.sealedSender = True
+    else:
+        ss.sent.sealedSender = False
+    return ss
+
+
+def _fill_outgoing(item: ChatItem, ids: IdAllocator, msg_row: dict, msg_json: dict) -> None:
+    """Populate outgoing details; group conversations are never send-status targets."""
+    item.authorId = ids.service_id_to_recipient.get("__self__", 0)
+
+    outgoing = item.outgoing
+    outgoing.dateReceived = msg_row.get("received_at_ms") or msg_row.get("received_at") or 0
+
+    send_state = msg_json.get("sendStateByConversationId", {})
+    for dest_conv_id, state in send_state.items():
+        dest_rid = ids.conversation_to_recipient.get(dest_conv_id)
+        if dest_rid is None or dest_conv_id in ids.group_conversations:
+            continue
+        outgoing.sendStatus.append(_map_send_status(dest_rid, state))
+
+
 def build_chat_item(
     ids: IdAllocator,
     msg_row: dict,
     msg_json: dict,
+    stats: dict[str, int] | None = None,
 ) -> Frame | None:
     """Build a ChatItem frame from a Desktop message row."""
-    conv_id = msg_row["conversationId"]
-    chat_id = ids.conversation_to_chat.get(conv_id)
+    chat_id = ids.conversation_to_chat.get(msg_row["conversationId"])
     if chat_id is None:
         return None
 
@@ -129,48 +198,12 @@ def build_chat_item(
     item.dateSent = msg_row.get("sent_at") or msg_row.get("timestamp") or 0
 
     if msg_type == "incoming":
-        source_sid = msg_row.get("sourceServiceId")
-        author_rid = ids.service_id_to_recipient.get(source_sid) if source_sid else None
-        if author_rid is None:
-            # Try to find by conversation
-            author_rid = ids.conversation_to_recipient.get(conv_id, 0)
-        item.authorId = author_rid
-
-        incoming = item.incoming
-        incoming.dateReceived = msg_row.get("received_at_ms") or msg_row.get("received_at") or 0
-        server_ts = msg_row.get("serverTimestamp")
-        if server_ts:
-            incoming.dateServerSent = server_ts
-        incoming.read = (msg_row.get("readStatus") or 0) >= 1
-        incoming.sealedSender = bool(msg_row.get("unidentifiedDeliveryReceived"))
-
+        if not _fill_incoming(item, ids, msg_row, stats):
+            return None
     elif msg_type == "outgoing":
-        self_rid = ids.service_id_to_recipient.get("__self__", 0)
-        item.authorId = self_rid
-
-        outgoing = item.outgoing
-        outgoing.dateReceived = msg_row.get("received_at_ms") or msg_row.get("received_at") or 0
-
-        send_state = msg_json.get("sendStateByConversationId", {})
-        for dest_conv_id, state in send_state.items():
-            dest_rid = ids.conversation_to_recipient.get(dest_conv_id)
-            if dest_rid is None:
-                continue
-            ss = SendStatus()
-            ss.recipientId = dest_rid
-            ss.timestamp = state.get("updatedAt", 0)
-            status_str = state.get("status", "Sent")
-            if status_str == "Delivered":
-                ss.delivered.sealedSender = True
-            elif status_str == "Read":
-                ss.read.sealedSender = True
-            elif status_str == "Viewed":
-                ss.viewed.sealedSender = True
-            elif status_str == "Sent":
-                ss.sent.sealedSender = True
-            else:
-                ss.sent.sealedSender = False
-            outgoing.sendStatus.append(ss)
+        _fill_outgoing(item, ids, msg_row, msg_json)
+    else:
+        return None
 
     # Message body, reactions, and quote. Reactions alone don't make a valid
     # StandardMessage; attachments may still be added later.

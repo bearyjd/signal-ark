@@ -26,7 +26,7 @@ def _make_seed() -> tuple[BackupInfo, Frame]:
     return info, frame
 
 
-def _build_v1_with_contacts_and_messages() -> bytes:
+def _build_v1_with_contacts_and_messages(alice_aci: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") -> bytes:
     """Build a synthetic v1 backup with realistic recipient + thread + sms tables."""
     sql_statements = [
         # Recipient table (modern schema)
@@ -43,7 +43,7 @@ def _build_v1_with_contacts_and_messages() -> bytes:
             [],
         ),
         ("INSERT INTO recipient VALUES (?, ?, ?, ?, ?, ?, ?)",
-         [1, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "+15551234567", "Alice Smith", 0, None, 0]),
+         [1, alice_aci, "+15551234567", "Alice Smith", 0, None, 0]),
         ("INSERT INTO recipient VALUES (?, ?, ?, ?, ?, ?, ?)",
          [2, "11111111-2222-3333-4444-555555555555", "+15559876543", "Bob Jones", 0, None, 0]),
         # Thread table
@@ -235,3 +235,30 @@ def test_convert_progress_callback() -> None:
     assert "v1 parsed" in stages
     assert "recipients mapped" in stages
     assert "messages mapped" in stages
+
+
+def test_convert_malformed_recipient_aci_is_skipped_not_raised() -> None:
+    v1_data = _build_v1_with_contacts_and_messages(alice_aci="abcd")
+    seed_info, seed_account = _make_seed()
+
+    with tempfile.NamedTemporaryFile(suffix=".backup", delete=False) as f:
+        f.write(v1_data)
+        v1_path = Path(f.name)
+
+    try:
+        result = convert_v1_to_v2(
+            v1_path=v1_path,
+            v1_passphrase=TEST_PASSPHRASE,
+            seed_backup_info=seed_info,
+            seed_account_frame=seed_account,
+            self_aci="00000000-0000-0000-0000-000000000000",
+        )
+    finally:
+        v1_path.unlink()
+
+    alice = next(
+        f.recipient.contact for f in result.frames
+        if f.HasField("recipient") and f.recipient.HasField("contact") and f.recipient.contact.e164 == 15551234567
+    )
+    assert alice.aci == b""
+    assert result.stats["recipients"] == 2

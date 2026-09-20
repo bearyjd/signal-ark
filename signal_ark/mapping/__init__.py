@@ -13,6 +13,7 @@ from signal_ark.mapping.recipients import (
     build_account_frame,
     build_contact_recipient,
     build_group_recipient,
+    build_member_recipient,
     build_self_recipient,
 )
 from signal_ark.mapping.util import (
@@ -36,6 +37,7 @@ __all__ = [
     "build_chat_item",
     "build_contact_recipient",
     "build_group_recipient",
+    "build_member_recipient",
     "build_self_recipient",
     "decrypt_desktop_attachment",
     "encrypt_attachment",

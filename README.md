@@ -129,14 +129,16 @@ See [v2 Backup Format Specification](docs/v2-backup-format.md) for a complete de
 | Content | Status |
 |---------|--------|
 | 1:1 text messages | Supported |
-| Group text messages | Not yet (chats are only built for 1:1 conversations) |
+| Group text messages | Supported |
 | Image/video/file attachments | Supported |
 | Contact profiles | Supported |
 | Conversation metadata | Supported |
 | Reactions, quotes | Supported |
-| Call history | Supported (1:1 calls; group calls pending group chat support) |
+| Call history | Supported (1:1 and group) |
 | Stickers | Passed through from seed |
 | Disappearing messages config | Supported |
+
+Not yet mapped: group update and other system messages (`group-v2-change`, `timer-notification`, `keychange`, ...) are skipped. Legacy GV1 groups and groups without a `masterKey` get no chat.
 
 ## Known Issues
 

@@ -19,6 +19,7 @@ from signal_ark.mapping.desktop_db import (
     _load_active_conversations,
     _load_contact_conversations,
     _load_group_conversations,
+    _load_group_sender_acis,
     _load_messages,
 )
 from signal_ark.mapping.ids import IdAllocator
@@ -26,8 +27,10 @@ from signal_ark.mapping.recipients import (
     build_account_frame,
     build_contact_recipient,
     build_group_recipient,
+    build_member_recipient,
     build_self_recipient,
 )
+from signal_ark.mapping.util import _normalize_aci
 from signal_ark.proto.Backup_pb2 import BackupInfo, Frame
 
 
@@ -107,6 +110,50 @@ def _emit_contact_recipients(
             stats["recipients"] += 1
 
 
+def _emit_member_if_unknown(
+    ids: IdAllocator, frames: list[Frame], stats: dict[str, int], aci: str | None, self_aci: str
+) -> None:
+    canonical = _normalize_aci(aci)
+    if canonical is None or canonical == _normalize_aci(self_aci):
+        return
+    if ids.resolve_service_id(canonical) is not None:
+        return
+    member_frame = build_member_recipient(ids, canonical)
+    if member_frame:
+        frames.append(member_frame)
+        stats["recipients"] += 1
+        stats["group_member_recipients"] += 1
+
+
+def _emit_group_member_recipients(
+    conn: sqlite3.Connection,
+    ids: IdAllocator,
+    frames: list[Frame],
+    stats: dict[str, int],
+    self_aci: str,
+) -> None:
+    # 4b. Minimal contacts for group members that have no conversation of their own,
+    # so incoming group messages always have a Contact author
+    for conv_row in _load_group_conversations(conn):
+        if conv_row["id"] not in ids.conversation_to_recipient:
+            continue
+        for member in json.loads(conv_row["json"]).get("membersV2") or []:
+            _emit_member_if_unknown(ids, frames, stats, member.get("aci"), self_aci)
+
+
+def _emit_group_sender_recipients(
+    conn: sqlite3.Connection,
+    ids: IdAllocator,
+    frames: list[Frame],
+    stats: dict[str, int],
+    self_aci: str,
+) -> None:
+    # 4c. Same for senders that have since left the group (not in membersV2)
+    for conv_id, source_sid in _load_group_sender_acis(conn):
+        if conv_id in ids.conversation_to_recipient:
+            _emit_member_if_unknown(ids, frames, stats, source_sid, self_aci)
+
+
 def _emit_chats(
     conn: sqlite3.Connection,
     ids: IdAllocator,
@@ -114,11 +161,15 @@ def _emit_chats(
     stats: dict[str, int],
     self_conv_id: str,
 ) -> None:
-    # 5. Build chats for conversations that have messages
+    # 5. Build chats for conversations that have messages and a recipient
+    # (a group without a masterKey has neither a recipient nor a chat)
     active_conversations = _load_active_conversations(conn, self_conv_id)
 
     for conv_row in active_conversations:
         conv_id = conv_row["id"]
+        if conv_id not in ids.conversation_to_recipient:
+            stats["chats_without_recipient"] += 1
+            continue
         conv_json = json.loads(conv_row["json"])
         chat_frame = build_chat(ids, conv_id, conv_json)
         if chat_frame:
@@ -142,7 +193,7 @@ def _emit_chat_items(
         if msg_dict.get("type") == "call-history":
             result_frame = build_call_item(ids, msg_dict, msg_json, conn, has_calls_table)
         else:
-            result_frame = build_chat_item(ids, msg_dict, msg_json)
+            result_frame = build_chat_item(ids, msg_dict, msg_json, stats)
 
         if result_frame:
             message_frame_index[msg_dict["id"]] = len(frames)
@@ -240,10 +291,13 @@ def map_desktop_to_frames(
     media_names: list[str] = []
     stats: dict[str, int] = {
         "recipients": 0,
+        "group_member_recipients": 0,
         "chats": 0,
+        "chats_without_recipient": 0,
         "messages": 0,
         "attachments": 0,
         "skipped_messages": 0,
+        "skipped_unresolved_author": 0,
         "plaintext_hash_mismatch": 0,
         "attachments_rejected_path": 0,
         "attachments_missing_file": 0,
@@ -257,6 +311,8 @@ def map_desktop_to_frames(
     seed_chat_folders = _emit_seed_frames(frames, seed_frames)
     _emit_group_recipients(conn, ids, frames, stats)
     _emit_contact_recipients(conn, ids, frames, stats, self_aci)
+    _emit_group_member_recipients(conn, ids, frames, stats, self_aci)
+    _emit_group_sender_recipients(conn, ids, frames, stats, self_aci)
     _emit_chats(conn, ids, frames, stats, self_conv_id)
     message_frame_index = _emit_chat_items(conn, ids, frames, stats)
 

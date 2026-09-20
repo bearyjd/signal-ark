@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from signal_ark.mapping.ids import IdAllocator
-from signal_ark.mapping.util import _b64_to_bytes, _uuid_str_to_bytes
+from signal_ark.mapping.util import _b64_to_bytes, _normalize_aci, _uuid_str_to_bytes
 from signal_ark.proto.Backup_pb2 import (
     AccountData,
     Contact,
@@ -106,6 +106,22 @@ def build_contact_recipient(
     return frame
 
 
+def build_member_recipient(ids: IdAllocator, aci: str) -> Frame | None:
+    """Build a minimal registered Contact recipient for a group member with no conversation."""
+    canonical = _normalize_aci(aci)
+    if canonical is None:
+        return None
+
+    rid = ids.alloc_recipient(canonical, service_id=canonical)
+
+    frame = Frame()
+    frame.recipient.id = rid
+    contact = frame.recipient.contact
+    contact.aci = _uuid_str_to_bytes(canonical)
+    contact.registered.CopyFrom(Contact.Registered())
+    return frame
+
+
 def _map_story_send_mode(mode_str: str | None) -> int:
     if mode_str == "Never":
         return Group.StorySendMode.DISABLED
@@ -120,6 +136,7 @@ def build_group_recipient(
     conv_id: str,
 ) -> Frame | None:
     """Build a Group recipient frame from a Desktop group conversation."""
+    ids.group_conversations.add(conv_id)
     master_key = _b64_to_bytes(conv.get("masterKey"))
     if not master_key:
         return None
@@ -159,11 +176,12 @@ def build_group_recipient(
 
     # Members
     for m in conv.get("membersV2") or []:
-        aci = m.get("aci")
-        if not aci:
+        try:
+            user_id = _uuid_str_to_bytes(m.get("aci") or "")
+        except ValueError:
             continue
         member = snapshot.members.add()
-        member.userId = _uuid_str_to_bytes(aci)
+        member.userId = user_id
         member.role = int(m.get("role", 1))
         member.joinedAtVersion = int(m.get("joinedAtVersion", 0))
 

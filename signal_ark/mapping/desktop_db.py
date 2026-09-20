@@ -62,14 +62,25 @@ def _load_contact_conversations(conn: sqlite3.Connection, self_aci: str) -> list
 
 
 def _load_active_conversations(conn: sqlite3.Connection, self_conv_id: str) -> list[sqlite3.Row]:
-    """Private conversations (including our own) that have at least one mappable message."""
+    """Private (including our own) and group conversations with at least one mappable message."""
     return conn.execute("""
         SELECT DISTINCT c.id, c.json
         FROM conversations c
         INNER JOIN messages m ON m.conversationId = c.id
-        WHERE c.type = 'private' AND (c.serviceId IS NOT NULL OR c.id = ?)
+        WHERE ((c.type = 'private' AND (c.serviceId IS NOT NULL OR c.id = ?)) OR c.type = 'group')
         AND m.type IN ('incoming', 'outgoing', 'call-history')
     """, (self_conv_id,)).fetchall()
+
+
+def _load_group_sender_acis(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Distinct (conversationId, sourceServiceId) pairs of incoming group messages."""
+    rows = conn.execute("""
+        SELECT DISTINCT m.conversationId, m.sourceServiceId
+        FROM messages m
+        INNER JOIN conversations c ON c.id = m.conversationId
+        WHERE c.type = 'group' AND m.type = 'incoming' AND m.sourceServiceId IS NOT NULL
+    """).fetchall()
+    return [(row[0], row[1]) for row in rows]
 
 
 def _load_messages(conn: sqlite3.Connection) -> list[sqlite3.Row]:

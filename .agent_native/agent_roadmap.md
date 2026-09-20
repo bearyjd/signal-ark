@@ -98,19 +98,19 @@ a shared factory rather than duplicating it a third time).
 ### 4. Consolidate/document the recipient-mapping duplication (effort: medium, prevents: silent divergence bugs)
 
 **Problem:** Recipient/contact/group mapping is implemented **twice**:
-`mapper.py` (`build_contact_recipient`, `build_group_recipient`, used by
+`mapping/recipients.py` (`build_contact_recipient`, `build_group_recipient`, used by
 the Desktop → v2 `build` path) and `v1_to_v2.py`
 (`_map_recipients_modern`, `_map_recipients_legacy`, used by the v1 →
 v2 `import-v1` path). Nothing in CLAUDE.md documents this; an agent fixing
 "group avatar color wrong" in one path has no signal that the same bug
 likely exists in the other, un-mapped path.
 
-**Files:** `signal_ark/mapper.py`, `signal_ark/v1_to_v2.py`
+**Files:** `signal_ark/mapping/recipients.py`, `signal_ark/v1_to_v2.py`
 
 **Recommended fix:** extract a shared `signal_ark/recipients.py` with the
 common "conversation JSON → Recipient frame" logic, parameterized over the
 differences between Desktop's modern schema and v1's legacy schema, and
-have both `mapper.py` and `v1_to_v2.py` call into it.
+have both `mapping/recipients.py` and `v1_to_v2.py` call into it.
 
 **Acceptance criteria:**
 - A single test (parameterized) validates contact/group recipient field mapping once, exercised through both call paths.
@@ -118,14 +118,16 @@ have both `mapper.py` and `v1_to_v2.py` call into it.
 
 ---
 
-### 5. Split `mapper.py` into a package (effort: medium-high, structural)
+### 5. Split `mapper.py` into a package (effort: medium-high, structural) — DONE
 
-**Problem:** `mapper.py` is 896 lines — over the repo's own 800-line/file
+**Status:** `signal_ark/mapper.py` (1,242 lines at the time) is now `signal_ark/mapping/{__init__,util,ids,recipients,chats,calls,attachments,desktop_db,pipeline}.py`, every file under 400 lines, public API re-exported from `__init__.py`, all call sites updated, zero behavior change (`SIGNAL_ARK_REQUIRE_VALIDATOR=1 uv run pytest`: 212 passed before and after, test edits limited to import lines).
+
+**Problem (at time of audit):** `mapper.py` was 896 lines — over the repo's own 800-line/file
 ceiling (`~/.claude/rules/common/coding-style.md`) — and mixes five
 concerns: `IdAllocator`/recipient allocation, chat building, chat-item
 (message/reaction/quote) building, call-item building, and Desktop
-attachment encrypt/decrypt. An agent asked to fix a call-history bug has to
-load and reason about all 896 lines to find the ~90 lines that matter.
+attachment encrypt/decrypt. An agent asked to fix a call-history bug had to
+load and reason about the whole file to find the ~90 lines that matter.
 
 **Files:** `signal_ark/mapper.py` → `signal_ark/mapping/{__init__.py, recipients.py, chats.py, calls.py, attachments.py}`
 
@@ -194,9 +196,9 @@ load and reason about all 896 lines to find the ~90 lines that matter.
 
 ### 4. Structural obstacles
 
-- `mapper.py` at 896 lines exceeds the project's own file-size convention
-  and bundles five distinct concerns (item 5).
-- Recipient/contact/group mapping duplicated between `mapper.py` and
+- ~~`mapper.py` at 896 lines exceeds the project's own file-size convention
+  and bundles five distinct concerns~~ (item 5 — resolved by the `mapping/` package split).
+- Recipient/contact/group mapping duplicated between `mapping/recipients.py` and
   `v1_to_v2.py` with no shared abstraction (item 4).
 - `inspect`'s validation logic is inlined in the CLI layer instead of being
   a reusable, independently testable library function.

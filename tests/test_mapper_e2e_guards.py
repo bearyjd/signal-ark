@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from signal_ark.mapper import (
+from signal_ark.mapping import (
     MAX_BODY_BYTES_WITH_LONG_TEXT,
     MAX_QUOTE_BODY_BYTES,
     MappingResult,

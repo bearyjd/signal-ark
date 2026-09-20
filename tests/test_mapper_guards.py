@@ -10,26 +10,25 @@ from pathlib import Path
 
 import pytest
 
-from signal_ark.mapper import (
+from signal_ark.mapping import (
     MAX_BODY_BYTES,
     MAX_BODY_BYTES_WITH_LONG_TEXT,
     MAX_QUOTE_BODY_BYTES,
     IdAllocator,
-    _attach_file_pointer_to_message,
-    _b64_to_bytes,
-    _build_message_attachment,
-    _encrypt_attachment_row,
-    _find_attachment_target,
-    _has_column,
-    _map_quote,
-    _map_reactions,
-    _resolve_attachment_source,
-    _to_int,
-    _trim_utf8,
     build_call_item,
     build_chat_item,
     build_self_recipient,
 )
+from signal_ark.mapping.attachments import (
+    _attach_file_pointer_to_message,
+    _build_message_attachment,
+    _encrypt_attachment_row,
+    _find_attachment_target,
+    _resolve_attachment_source,
+)
+from signal_ark.mapping.chats import _map_quote, _map_reactions
+from signal_ark.mapping.desktop_db import _has_column
+from signal_ark.mapping.util import _b64_to_bytes, _to_int, _trim_utf8
 from signal_ark.proto.Backup_pb2 import Quote
 
 SELF_ACI = "aci-self"
@@ -329,7 +328,7 @@ def test_attach_file_pointer_leaves_empty_frame_untouched_for_long_text() -> Non
 
 
 def test_contact_recipient_malformed_keys_are_left_unset() -> None:
-    from signal_ark.mapper import build_contact_recipient
+    from signal_ark.mapping import build_contact_recipient
 
     conv = {"serviceId": "aci-alice", "profileKey": "not base64!!", "identityKey": "A"}
     frame = build_contact_recipient(IdAllocator(), conv, "conv-alice")

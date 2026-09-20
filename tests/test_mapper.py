@@ -9,23 +9,26 @@ import os
 import sqlite3
 from pathlib import Path
 
-from signal_ark.mapper import (
+from signal_ark.mapping import (
     IdAllocator,
-    _attach_file_pointer_to_message,
-    _build_message_attachment,
-    _collect_legacy_attachments,
-    _find_attachment_target,
-    encrypt_attachment,
-    _get_call_info,
-    _has_column,
-    _has_table,
-    _map_quote,
-    _map_reactions,
-    _resolve_recipient_id,
     build_call_item,
     build_chat_item,
     build_self_recipient,
+    encrypt_attachment,
 )
+from signal_ark.mapping.attachments import (
+    _attach_file_pointer_to_message,
+    _build_message_attachment,
+    _find_attachment_target,
+)
+from signal_ark.mapping.calls import _get_call_info
+from signal_ark.mapping.chats import _map_quote, _map_reactions
+from signal_ark.mapping.desktop_db import (
+    _collect_legacy_attachments,
+    _has_column,
+    _has_table,
+)
+from signal_ark.mapping.ids import _resolve_recipient_id
 from signal_ark.proto.Backup_pb2 import Frame, GroupCall, IndividualCall, Quote
 
 SELF_ACI = "aci-self"

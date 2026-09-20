@@ -7,7 +7,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from signal_ark.mapper import decrypt_desktop_attachment, encrypt_attachment
+from signal_ark.mapping import decrypt_desktop_attachment, encrypt_attachment
 
 
 def _make_desktop_encrypted_file(

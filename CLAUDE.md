@@ -46,7 +46,7 @@ No `ruff`/`mypy` config exists yet. `mypy-protobuf` (dev dependency) only genera
 
 ## Agent-native audit
 
-`.agent_native/agent_roadmap.md` contains a prioritized audit of gaps that block an AI agent from autonomously reproducing, implementing, testing, and verifying a bug fix or feature end-to-end (missing synthetic-backup fixtures, missing CLI-level tests, structural entanglement in `mapper.py`, etc.). Consult it before starting non-trivial work — it flags what to build first for the biggest reduction in required human attention.
+`.agent_native/agent_roadmap.md` contains a prioritized audit of gaps that block an AI agent from autonomously reproducing, implementing, testing, and verifying a bug fix or feature end-to-end (missing synthetic-backup fixtures, missing CLI-level tests, structural entanglement in the old `mapper.py`, etc.). Consult it before starting non-trivial work — it flags what to build first for the biggest reduction in required human attention.
 
 ## Architecture
 
@@ -68,7 +68,7 @@ All derivation constants are date-prefixed strings (e.g. `"20241007_SIGNAL_BACKU
 - **metadata.py** — Read/write the `metadata` file (AES-256-CTR encrypted BackupId).
 - **decrypt.py** — Decrypt `main` file: detect legacy/modern format, verify HMAC, AES-256-CBC decrypt, gzip decompress, parse varint-delimited protobuf frames. Also has `_write_varint` used by encrypt.py.
 - **encrypt.py** — Reverse of decrypt: serialize frames → gzip → AES-CBC → HMAC. Also writes the files manifest and the complete backup directory.
-- **mapper.py** — The big one. Reads Desktop's SQLite DB and produces v2 `Frame` protobufs. Handles Recipients (self, contacts, groups), Chats, ChatItems (incoming/outgoing messages), and attachment encryption. Uses `IdAllocator` to map Desktop conversation IDs to backup recipient/chat IDs.
+- **mapping/** — Reads Desktop's SQLite DB and produces v2 `Frame` protobufs. Public API is re-exported from `mapping/__init__.py`; private helpers live in the owning submodule: `util.py` (byte/int/UTF-8 helpers, `MAX_*` body limits), `ids.py` (`IdAllocator`, Desktop-ID → recipient-ID resolution), `recipients.py` (AccountData/Self/Contact/Group frames), `chats.py` (Chat + message ChatItem frames, reactions, quotes), `calls.py` (call-history ChatItems), `attachments.py` (Desktop attachment decrypt, content-store encrypt, FilePointer wiring), `desktop_db.py` (all SQLite queries, stdlib only), `pipeline.py` (`map_desktop_to_frames` orchestration, one `_emit_*` helper per step).
 - **v1_decrypt.py** — v1 backup KDF and per-frame decryption. SHA-512 iterated 250K times → HKDF("Backup Export") → cipher_key + mac_key. Stateful `V1FrameDecryptor` with counter-bump AES-256-CTR, truncated HMAC verification.
 - **v1_parser.py** — Streaming v1 backup parser. Yields typed `V1ParsedFrame` objects (statements, preferences, attachments with inline data). `collect_v1_database()` replays SQL into in-memory SQLite.
 - **v1_to_v2.py** — Converts parsed v1 backup into v2 frames. Maps recipients (modern `recipient` table or legacy `recipient_preferences`), threads, sms/mms messages, and re-encrypts inline attachments.
@@ -109,13 +109,13 @@ Desktop stores attachments encrypted at rest using a per-file `localKey` (64 byt
 
 The `message_attachments` table only exists in newer Desktop versions. Older versions embed attachment metadata in the `messages.json` blob and may store files as plaintext.
 
-The `decrypt_desktop_attachment` function in `mapper.py` handles this decryption. `encrypt_attachment` accepts optional `desktop_local_key` and `plaintext_size` params to decrypt before re-encrypting for the backup.
+The `decrypt_desktop_attachment` function in `mapping/attachments.py` handles this decryption. `encrypt_attachment` accepts optional `desktop_local_key` and `plaintext_size` params to decrypt before re-encrypting for the backup.
 
 ### Recipient mapping is duplicated across two paths — change both or neither
 
 There are **two independent implementations** of "conversation JSON → v2 Recipient frame":
 
-- `mapper.py`'s `build_contact_recipient` / `build_group_recipient` — used by the Desktop-DB → v2 `build` path.
+- `mapping/recipients.py`'s `build_contact_recipient` / `build_group_recipient` — used by the Desktop-DB → v2 `build` path.
 - `v1_to_v2.py`'s `_map_recipients_modern` / `_map_recipients_legacy` — used by the v1-backup → v2 `import-v1` path.
 
 They are not layered on top of each other. A bug or field-mapping fix in one (e.g. avatar color, profile name, group membership) very likely exists in the other and must be checked/fixed there too. There is no shared abstraction yet (tracked in `.agent_native/agent_roadmap.md` item 4) — until that lands, treat any recipient-mapping change as a two-file change.

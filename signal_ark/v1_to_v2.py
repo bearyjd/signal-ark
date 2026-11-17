@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from signal_ark.mapping import IdAllocator, encrypt_attachment
+from signal_ark.mapping.attachments import _attach_file_pointer_to_message
 from signal_ark.mapping.util import _normalize_aci, _uuid_str_to_bytes
 from signal_ark.proto.Backup_pb2 import (
     BackupInfo,
@@ -489,14 +490,20 @@ def _map_mms_messages(
 
     col_names = [desc[0] for desc in conn.execute(f"SELECT * FROM {table} LIMIT 0").description]
 
-    # Build attachment lookup: mms_id -> list of (rowId, attachmentId)
-    att_lookup: dict[int, list[tuple[int, int]]] = {}
+    # Build attachment lookup: mms_id -> list of (rowId, attachmentId, pointer metadata)
+    att_lookup: dict[int, list[tuple[int, int, dict]]] = {}
     if _table_exists(conn, "part"):
+        part_cols = _get_columns(conn, "part")
+        ct_expr = "ct" if "ct" in part_cols else "NULL"
+        size_expr = "data_size" if "data_size" in part_cols else "NULL"
         try:
-            parts = conn.execute("SELECT _id, mid, unique_id FROM part ORDER BY _id").fetchall()
+            parts = conn.execute(
+                f"SELECT _id, mid, unique_id, {ct_expr}, {size_expr} FROM part ORDER BY _id"
+            ).fetchall()
             for p in parts:
                 mid = p[1]
-                att_lookup.setdefault(mid, []).append((p[0], p[2] if p[2] else 0))
+                meta = {"contentType": p[3], "size": p[4]}
+                att_lookup.setdefault(mid, []).append((p[0], p[2] if p[2] else 0, meta))
         except Exception:
             pass
 
@@ -510,7 +517,7 @@ def _map_mms_messages(
         # Attach inline attachment data if available
         mms_id = m.get("_id")
         if mms_id and output_files_dir and mms_id in att_lookup:
-            for row_id, att_id in att_lookup[mms_id]:
+            for row_id, att_id, att_meta in att_lookup[mms_id]:
                 att_data = attachment_index.get((row_id, att_id))
                 if not att_data:
                     continue
@@ -525,6 +532,12 @@ def _map_mms_messages(
                     if result:
                         media_names.append(result.media_name)
                         stats["attachments"] += 1
+                        # The blob is unrecoverable unless the FilePointer
+                        # carries encrypt_attachment's localKey/plaintextHash.
+                        _attach_file_pointer_to_message(
+                            frame, att_meta, result.local_key_b64, ids,
+                            plaintext_hash=result.plaintext_hash,
+                        )
                 finally:
                     tmp_path.unlink(missing_ok=True)
 

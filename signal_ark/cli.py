@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import click
@@ -20,6 +21,7 @@ from signal_ark.kdf import (
     backup_key_to_message_backup_key,
     validate_aep,
 )
+from signal_ark.fsutil import open_private, write_private_bytes, write_private_text
 from signal_ark.metadata import decrypt_metadata
 
 
@@ -49,7 +51,7 @@ def decrypt(seed_dir: Path, passphrase: str, aci: str | None, output: Path) -> N
     click.echo(f"BackupId:  {meta.backup_id.hex()}")
     click.echo(f"Version:   {meta.version}")
 
-    (output / "metadata.json").write_text(json.dumps(meta.to_dict(), indent=2))
+    write_private_text(output / "metadata.json", json.dumps(meta.to_dict(), indent=2))
     click.echo(f"Wrote {output / 'metadata.json'}")
 
     hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
@@ -64,14 +66,14 @@ def decrypt(seed_dir: Path, passphrase: str, aci: str | None, output: Path) -> N
     click.echo(f"Main file: {len(main_data)} bytes, first 8: {main_data[:8].hex()}")
 
     plaintext = decrypt_main(main_data, hmac_key, aes_key)
-    (output / "main.plaintext").write_bytes(plaintext)
+    write_private_bytes(output / "main.plaintext", plaintext)
     click.echo(f"Wrote {output / 'main.plaintext'} ({len(plaintext)} bytes)")
 
     result = parse_frames(plaintext)
     click.echo(f"BackupInfo version: {result.backup_info.version}")
     click.echo(f"Frames: {len(result.frames)}")
 
-    with open(output / "frames.jsonl", "w") as f:
+    with os.fdopen(open_private(output / "frames.jsonl"), "w") as f:
         info_dict = backup_info_to_dict(result.backup_info)
         f.write(json.dumps({"_type": "BackupInfo", **info_dict}) + "\n")
         for frame in result.frames:
@@ -86,7 +88,7 @@ def decrypt(seed_dir: Path, passphrase: str, aci: str | None, output: Path) -> N
         files_data = files_path.read_bytes()
         click.echo(f"Files manifest: {len(files_data)} bytes")
         media_names = parse_files_manifest(files_data)
-        (output / "files_manifest.json").write_text(json.dumps(media_names, indent=2))
+        write_private_text(output / "files_manifest.json", json.dumps(media_names, indent=2))
         click.echo(f"Wrote {output / 'files_manifest.json'} ({len(media_names)} entries)")
 
     click.echo("Done.")
@@ -316,7 +318,7 @@ def dump_v1(v1_backup: Path, v1_passphrase: str, output: Path) -> None:
     outfile = output / "v1-frames.jsonl"
 
     count = 0
-    with open(outfile, "w") as f:
+    with os.fdopen(open_private(outfile), "w") as f:
         for parsed in parse_v1_backup(v1_backup, v1_passphrase):
             d = MessageToDict(parsed.frame, preserving_proto_field_name=True)
             d["_frame_type"] = parsed.frame_type.name

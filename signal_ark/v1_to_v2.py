@@ -17,7 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from signal_ark.mapping import IdAllocator, encrypt_attachment
-from signal_ark.mapping.attachments import _attach_file_pointer_to_message
+from signal_ark.mapping.attachments import (
+    _attach_file_pointer_to_message,
+    _has_text_body,
+    _is_long_text,
+)
 from signal_ark.mapping.util import _normalize_aci, _uuid_str_to_bytes
 from signal_ark.proto.Backup_pb2 import (
     BackupInfo,
@@ -521,6 +525,9 @@ def _map_mms_messages(
                 att_data = attachment_index.get((row_id, att_id))
                 if not att_data:
                     continue
+                if _is_long_text(att_meta) and not _has_text_body(frame):
+                    # No body to attach it to: encrypting would orphan the blob.
+                    continue
 
                 import tempfile
                 with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -535,7 +542,8 @@ def _map_mms_messages(
                         # The blob is unrecoverable unless the FilePointer
                         # carries encrypt_attachment's localKey/plaintextHash.
                         _attach_file_pointer_to_message(
-                            frame, att_meta, result.local_key_b64, ids,
+                            frame, {**att_meta, "size": len(att_data)},
+                            result.local_key_b64, ids,
                             plaintext_hash=result.plaintext_hash,
                         )
                 finally:

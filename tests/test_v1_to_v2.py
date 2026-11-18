@@ -317,3 +317,75 @@ def test_convert_malformed_recipient_aci_is_skipped_not_raised() -> None:
     )
     assert alice.aci == b""
     assert result.stats["recipients"] == 2
+
+
+def _convert_v1_single_part(*, body: str | None, ct: str, data_size: int, data: bytes):
+    """Convert a v1 backup holding one mms with one part; returns (result, files_dir listing)."""
+    sql_statements = [
+        ("CREATE TABLE recipient (_id INTEGER PRIMARY KEY, aci TEXT, e164 TEXT, "
+         "profile_joined_name TEXT, blocked INTEGER DEFAULT 0, group_id TEXT, group_type INTEGER DEFAULT 0)", []),
+        ("INSERT INTO recipient VALUES (?, ?, ?, ?, ?, ?, ?)",
+         [1, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "+15551234567", "Alice", 0, None, 0]),
+        ("CREATE TABLE thread (_id INTEGER PRIMARY KEY, recipient_id INTEGER, archived INTEGER DEFAULT 0)", []),
+        ("INSERT INTO thread VALUES (?, ?, ?)", [10, 1, 0]),
+        ("CREATE TABLE mms (_id INTEGER PRIMARY KEY, thread_id INTEGER, address TEXT, "
+         "type INTEGER, body TEXT, date INTEGER, date_received INTEGER, read INTEGER DEFAULT 0)", []),
+        ("INSERT INTO mms VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         [200, 10, "1", 1, body, 1700000010000, 1700000010500, 1]),
+        ("CREATE TABLE part (_id INTEGER PRIMARY KEY, mid INTEGER, unique_id INTEGER, "
+         "ct TEXT, data_size INTEGER)", []),
+        ("INSERT INTO part VALUES (?, ?, ?, ?, ?)", [1, 200, 100, ct, data_size]),
+    ]
+    v1_data = build_synthetic_v1_backup(sql_statements=sql_statements, attachment_data=data)
+    seed_info, seed_account = _make_seed()
+    with tempfile.NamedTemporaryFile(suffix=".backup", delete=False) as f:
+        f.write(v1_data)
+        v1_path = Path(f.name)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        files_dir = Path(tmpdir) / "files"
+        try:
+            result = convert_v1_to_v2(
+                v1_path=v1_path,
+                v1_passphrase=TEST_PASSPHRASE,
+                seed_backup_info=seed_info,
+                seed_account_frame=seed_account,
+                self_aci="00000000-0000-0000-0000-000000000000",
+                output_files_dir=files_dir,
+            )
+        finally:
+            v1_path.unlink()
+        blobs = [p for p in files_dir.rglob("*") if p.is_file()] if files_dir.exists() else []
+        return result, blobs
+
+
+def test_v1_pointer_size_uses_actual_blob_length_not_stale_data_size() -> None:
+    data = b"fake jpeg image data " * 100
+    result, _ = _convert_v1_single_part(body="hi", ct="image/jpeg", data_size=12345, data=data)
+    items = [f.chatItem for f in result.frames if f.HasField("chatItem")]
+    pointer = items[0].standardMessage.attachments[0].pointer
+    assert pointer.locatorInfo.size == len(data)
+
+
+def test_v1_long_text_without_body_leaves_no_orphan_blob() -> None:
+    data = b"long text payload " * 50
+    result, blobs = _convert_v1_single_part(
+        body=None, ct="text/x-signal-plain", data_size=len(data), data=data
+    )
+    assert blobs == []
+    assert result.media_names == []
+    assert result.stats["attachments"] == 0
+
+
+def test_v1_long_text_with_body_sets_long_text_and_trims_body() -> None:
+    data = b"long text payload " * 50
+    body = "x" * 5000
+    result, blobs = _convert_v1_single_part(
+        body=body, ct="text/x-signal-plain", data_size=len(data), data=data
+    )
+    items = [f.chatItem for f in result.frames if f.HasField("chatItem")]
+    std = items[0].standardMessage
+    assert std.HasField("longText")
+    assert len(std.text.body.encode()) < len(body)
+    assert len(std.attachments) == 0
+    assert len(blobs) == 1
+    assert result.stats["attachments"] == 1

@@ -140,3 +140,52 @@ async def test_input_back_returns_to_welcome() -> None:
         await pilot.pause()
         radio = app.screen.query_one(RadioSet)
         assert radio is not None
+
+
+# --- Cancel button on the progress screen ---
+
+
+def test_run_build_cancelled_before_start_writes_nothing(tmp_path) -> None:
+    import threading
+
+    from signal_ark.tui.worker import Cancelled, run_build
+
+    out = tmp_path / "out"
+    out.mkdir()
+    state = WizardState(mode="build", output_dir=out)
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(Cancelled):
+        run_build(state, on_log=lambda _m: None, cancel=cancel)
+
+    assert list(out.iterdir()) == []
+
+
+def test_run_inspect_cancelled_raises(tmp_path) -> None:
+    import threading
+
+    from signal_ark.tui.worker import Cancelled, run_inspect
+
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(Cancelled):
+        run_inspect(WizardState(mode="inspect"), on_log=lambda _m: None, cancel=cancel)
+
+
+@pytest.mark.asyncio
+async def test_progress_cancel_button_enabled_and_sets_flag() -> None:
+    from signal_ark.tui.screens import ProgressScreen
+
+    app = SignalArkApp()
+    async with app.run_test() as pilot:
+        screen = ProgressScreen()
+        # mode unset: no worker is started, so only the button/flag are exercised
+        await app.push_screen(screen)
+        await pilot.pause()
+        button = screen.query_one("#progress-cancel", Button)
+        assert button.disabled is False
+        assert not screen.cancel_event.is_set()
+        await pilot.click("#progress-cancel")
+        await pilot.pause()
+        assert screen.cancel_event.is_set()

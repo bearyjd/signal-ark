@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Callable
 
 from signal_ark.tui.app import WizardState
+
+
+class Cancelled(Exception):
+    """Raised when the user cancels a running build/inspect."""
+
+
+def _check_cancel(cancel: threading.Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise Cancelled("Cancelled by user")
+
+
+def _discard_files_dir(files_dir: Path, preexisted: bool) -> None:
+    """Remove attachments written by a cancelled run (only if we created the dir)."""
+    if not preexisted and files_dir.exists():
+        shutil.rmtree(files_dir, ignore_errors=True)
 
 
 def run_preview(state: WizardState) -> dict[str, int]:
@@ -65,6 +82,7 @@ def run_preview(state: WizardState) -> dict[str, int]:
 def run_build(
     state: WizardState,
     on_log: Callable[[str], None],
+    cancel: threading.Event | None = None,
 ) -> dict[str, int]:
     """Execute a full build and return stats."""
     from signal_ark.decrypt import decrypt_main, parse_frames
@@ -73,6 +91,7 @@ def run_build(
     from signal_ark.mapping import map_desktop_to_frames
     from signal_ark.metadata import decrypt_metadata
 
+    _check_cancel(cancel)
     aep = validate_aep(state.passphrase)
     backup_key = aep_to_backup_key(aep)
     on_log("Derived backup key.")
@@ -97,19 +116,26 @@ def run_build(
 
     assert state.output_dir is not None
     files_dir = state.output_dir / "files"
+    files_dir_preexisted = files_dir.exists()
+    _check_cancel(cancel)
     on_log("Mapping Desktop data to backup frames...")
 
     assert state.desktop_db is not None
     assert state.attachments_dir is not None
-    result = map_desktop_to_frames(
-        db_path=state.desktop_db,
-        attachments_dir=state.attachments_dir,
-        seed_backup_info=seed_result.backup_info,
-        seed_account_frame=seed_account_frame,
-        seed_frames=seed_result.frames,
-        self_aci=state.self_aci,
-        output_files_dir=files_dir,
-    )
+    try:
+        result = map_desktop_to_frames(
+            db_path=state.desktop_db,
+            attachments_dir=state.attachments_dir,
+            seed_backup_info=seed_result.backup_info,
+            seed_account_frame=seed_account_frame,
+            seed_frames=seed_result.frames,
+            self_aci=state.self_aci,
+            output_files_dir=files_dir,
+        )
+        _check_cancel(cancel)
+    except Cancelled:
+        _discard_files_dir(files_dir, files_dir_preexisted)
+        raise
 
     on_log(f"Mapped: {result.stats}")
 
@@ -139,12 +165,14 @@ def run_build(
 def run_inspect(
     state: WizardState,
     on_log: Callable[[str], None],
+    cancel: threading.Event | None = None,
 ) -> dict[str, int]:
     """Inspect a backup and return frame stats."""
     from signal_ark.decrypt import decrypt_main, parse_frames
     from signal_ark.kdf import aep_to_backup_key, backup_key_to_message_backup_key, validate_aep
     from signal_ark.metadata import decrypt_metadata
 
+    _check_cancel(cancel)
     aep = validate_aep(state.passphrase)
     backup_key = aep_to_backup_key(aep)
 

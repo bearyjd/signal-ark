@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -226,12 +227,16 @@ class PreviewScreen(Screen):
 class ProgressScreen(Screen):
     """Execute the build/inspect and show live progress."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_event = threading.Event()
+
     def compose(self) -> ComposeResult:
         with Vertical(id="progress-container"):
             yield Static("Running...", id="progress-title")
             yield RichLog(id="progress-log", wrap=True, markup=True)
             with Horizontal(classes="button-row"):
-                yield Button("Cancel", id="progress-cancel", disabled=True)
+                yield Button("Cancel", id="progress-cancel")
 
     def on_mount(self) -> None:
         state: WizardState = self.app.wizard_state
@@ -248,15 +253,24 @@ class ProgressScreen(Screen):
 
     def _run_build(self) -> dict[str, int]:
         from signal_ark.tui.worker import run_build
-        return run_build(self.app.wizard_state, on_log=self._log)
+        return run_build(self.app.wizard_state, on_log=self._log, cancel=self.cancel_event)
 
     def _run_inspect(self) -> dict[str, int]:
         from signal_ark.tui.worker import run_inspect
-        return run_inspect(self.app.wizard_state, on_log=self._log)
+        return run_inspect(self.app.wizard_state, on_log=self._log, cancel=self.cancel_event)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "progress-cancel":
+            self.cancel_event.set()
+            event.button.disabled = True
+            self._append_log("[yellow]Cancelling...[/yellow]")
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.state == WorkerState.SUCCESS:
             self.app.push_screen(ResultsScreen())
+        elif event.state == WorkerState.ERROR and self.cancel_event.is_set():
+            self.query_one("#progress-title", Static).update("Cancelled")
+            self._append_log("[yellow]Cancelled. No backup was written.[/yellow]")
         elif event.state == WorkerState.ERROR:
             err = str(event.worker.error) if event.worker.error else "Unknown error"
             self._append_log(f"[bold red]ERROR:[/bold red] {err}")

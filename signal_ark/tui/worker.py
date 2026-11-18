@@ -36,7 +36,9 @@ def _discard_new_files(files_dir: Path, before: frozenset[Path], preexisted: boo
         return
     new_paths = sorted(set(files_dir.rglob("*")) - before, reverse=True)
     for path in new_paths:
-        if path.is_dir():
+        if path.is_symlink():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
         else:
             path.unlink(missing_ok=True)

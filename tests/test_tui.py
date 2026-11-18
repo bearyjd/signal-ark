@@ -429,3 +429,80 @@ def test_run_build_cancel_before_mapping_never_maps(tmp_path, monkeypatch) -> No
         run_build(state, on_log=lambda _m: None, cancel=cancel)
     assert mapped == []
     assert list(state.output_dir.iterdir()) == []
+
+
+def test_run_inspect_cancel_after_decrypt_skips_parse(tmp_path, monkeypatch) -> None:
+    import threading
+    import types
+
+    from signal_ark import decrypt, kdf, metadata
+    from signal_ark.tui.worker import Cancelled, run_inspect
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "main").write_bytes(b"")
+    cancel = threading.Event()
+    monkeypatch.setattr(kdf, "validate_aep", lambda p: p)
+    monkeypatch.setattr(kdf, "aep_to_backup_key", lambda a: b"k")
+    monkeypatch.setattr(kdf, "backup_key_to_message_backup_key", lambda k, i: (b"h", b"a"))
+    monkeypatch.setattr(
+        metadata, "decrypt_metadata", lambda *_a: types.SimpleNamespace(backup_id=b"i", version=1)
+    )
+    monkeypatch.setattr(decrypt, "decrypt_main", lambda *_a: cancel.set() or b"")
+    parsed = []
+    monkeypatch.setattr(decrypt, "parse_frames", lambda _p: parsed.append(1))
+    with pytest.raises(Cancelled):
+        run_inspect(
+            WizardState(mode="inspect", seed_dir=seed, passphrase="x"),
+            on_log=lambda _m: None,
+            cancel=cancel,
+        )
+    assert parsed == []
+
+
+def test_run_build_cancel_after_metadata_skips_decrypt_main(tmp_path, monkeypatch) -> None:
+    import threading
+
+    from signal_ark import decrypt, kdf
+    from signal_ark.tui.worker import Cancelled, run_build
+
+    state = _build_state(tmp_path)
+    (state.seed_dir / "main").write_bytes(b"")
+    cancel = threading.Event()
+    _patch_build_deps(monkeypatch, lambda **kw: None)
+    # cancel arrives while the metadata step is finishing
+    monkeypatch.setattr(
+        kdf, "backup_key_to_message_backup_key", lambda k, i: cancel.set() or (b"h", b"a")
+    )
+    decrypted = []
+    monkeypatch.setattr(decrypt, "decrypt_main", lambda *_a: decrypted.append(1) or b"")
+    with pytest.raises(Cancelled):
+        run_build(state, on_log=lambda _m: None, cancel=cancel)
+    assert decrypted == []
+
+
+def test_run_build_cancel_removes_new_symlink(tmp_path, monkeypatch) -> None:
+    import threading
+    import types
+
+    from signal_ark.tui.worker import Cancelled, run_build
+
+    state = _build_state(tmp_path)
+    (state.seed_dir / "main").write_bytes(b"")
+    files = state.output_dir / "files"
+    files.mkdir()
+    (files / "old.bin").write_bytes(b"old")
+    target = tmp_path / "target_dir"
+    target.mkdir()
+    cancel = threading.Event()
+
+    def fake_map(**kw):
+        (kw["output_files_dir"] / "link").symlink_to(target)
+        cancel.set()
+        return types.SimpleNamespace(stats={}, media_names=[], backup_info=None, frames=[])
+
+    _patch_build_deps(monkeypatch, fake_map)
+    with pytest.raises(Cancelled):
+        run_build(state, on_log=lambda _m: None, cancel=cancel)
+    assert not (files / "link").is_symlink()
+    assert target.exists()

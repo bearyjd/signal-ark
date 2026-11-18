@@ -7,8 +7,15 @@ from pathlib import Path
 
 
 def open_private(path: Path) -> int:
-    """Open ``path`` for writing, creating it atomically with mode 0600."""
-    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    """Open ``path`` for writing with mode 0600, tightening pre-existing files."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def write_private_bytes(path: Path, data: bytes) -> None:

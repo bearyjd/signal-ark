@@ -115,7 +115,12 @@ class TestMapperGuardsE2E:
         self.outside_file = tmp_path / "escape.bin"
         _create_desktop_db(self.db_path)
 
-    def _map(self, *, with_output: bool = True) -> MappingResult:
+    def _map(
+        self,
+        *,
+        with_output: bool = True,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+    ) -> MappingResult:
         return map_desktop_to_frames(
             db_path=self.db_path,
             attachments_dir=self.attachments_dir,
@@ -124,7 +129,17 @@ class TestMapperGuardsE2E:
             seed_frames=[],
             self_aci=SELF_ACI,
             output_files_dir=self.output_dir if with_output else None,
+            progress_callback=progress_callback,
         )
+
+    def test_progress_callback_is_invoked(self) -> None:
+        calls: list[tuple[str, int, int]] = []
+        result = self._map(
+            with_output=False, progress_callback=lambda s, d, k: calls.append((s, d, k))
+        )
+        assert [c[0] for c in calls] == ["recipients mapped", "messages mapped"]
+        assert calls[-1][1] > 0
+        assert result.frames
 
     def _write_attachment(self, rel_path: str, data: bytes) -> None:
         target = self.attachments_dir / rel_path

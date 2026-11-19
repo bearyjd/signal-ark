@@ -282,6 +282,8 @@ def map_desktop_to_frames(
         seed_frames: All frames from the seed backup (for carrying over required frames)
         self_aci: Our own ACI UUID string
         output_files_dir: If provided, encrypt attachments here
+        progress_callback: Optional (stage, done, skipped) callback invoked after
+            each major stage
     """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -313,13 +315,19 @@ def map_desktop_to_frames(
     _emit_contact_recipients(conn, ids, frames, stats, self_aci)
     _emit_group_member_recipients(conn, ids, frames, stats, self_aci)
     _emit_group_sender_recipients(conn, ids, frames, stats, self_aci)
+    if progress_callback:
+        progress_callback("recipients mapped", stats["recipients"], 0)
     _emit_chats(conn, ids, frames, stats, self_conv_id)
     message_frame_index = _emit_chat_items(conn, ids, frames, stats)
+    if progress_callback:
+        progress_callback("messages mapped", stats["messages"], stats["skipped_messages"])
 
     if output_files_dir:
         media_names = _emit_attachments(
             conn, ids, frames, stats, attachments_dir, output_files_dir, message_frame_index
         )
+        if progress_callback:
+            progress_callback("attachments mapped", stats["attachments"], stats["attachment_failures"])
 
     conn.close()
 

@@ -389,3 +389,11 @@ def test_v1_long_text_with_body_sets_long_text_and_trims_body() -> None:
     assert len(std.attachments) == 0
     assert len(blobs) == 1
     assert result.stats["attachments"] == 1
+
+
+def test_v1_long_text_without_body_counts_stat() -> None:
+    data = b"long text payload " * 50
+    result, _ = _convert_v1_single_part(
+        body=None, ct="text/x-signal-plain", data_size=len(data), data=data
+    )
+    assert result.stats["long_text_without_body"] == 1

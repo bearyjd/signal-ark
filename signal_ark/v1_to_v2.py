@@ -527,6 +527,7 @@ def _map_mms_messages(
                     continue
                 if _is_long_text(att_meta) and not _has_text_body(frame):
                     # No body to attach it to: encrypting would orphan the blob.
+                    stats["long_text_without_body"] = stats.get("long_text_without_body", 0) + 1
                     continue
 
                 import tempfile

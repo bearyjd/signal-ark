@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -12,6 +13,7 @@ from textual.worker import Worker, WorkerState
 
 from signal_ark.tui.app import WizardState
 from signal_ark.tui.widgets import PassphraseInput, PathBrowserModal
+from signal_ark.tui.worker import Cancelled
 
 
 class WelcomeScreen(Screen):
@@ -226,19 +228,24 @@ class PreviewScreen(Screen):
 class ProgressScreen(Screen):
     """Execute the build/inspect and show live progress."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_event = threading.Event()
+
     def compose(self) -> ComposeResult:
         with Vertical(id="progress-container"):
             yield Static("Running...", id="progress-title")
             yield RichLog(id="progress-log", wrap=True, markup=True)
             with Horizontal(classes="button-row"):
-                yield Button("Cancel", id="progress-cancel", disabled=True)
+                yield Button("Cancel", id="progress-cancel")
+                yield Button("Quit", id="progress-quit", disabled=True)
 
     def on_mount(self) -> None:
         state: WizardState = self.app.wizard_state
         if state.mode == "build":
-            self.run_worker(self._run_build, thread=True)
+            self.run_worker(self._run_build, thread=True, exit_on_error=False)
         elif state.mode == "inspect":
-            self.run_worker(self._run_inspect, thread=True)
+            self.run_worker(self._run_inspect, thread=True, exit_on_error=False)
 
     def _log(self, msg: str) -> None:
         self.app.call_from_thread(self._append_log, msg)
@@ -248,19 +255,37 @@ class ProgressScreen(Screen):
 
     def _run_build(self) -> dict[str, int]:
         from signal_ark.tui.worker import run_build
-        return run_build(self.app.wizard_state, on_log=self._log)
+        return run_build(self.app.wizard_state, on_log=self._log, cancel=self.cancel_event)
 
     def _run_inspect(self) -> dict[str, int]:
         from signal_ark.tui.worker import run_inspect
-        return run_inspect(self.app.wizard_state, on_log=self._log)
+        return run_inspect(self.app.wizard_state, on_log=self._log, cancel=self.cancel_event)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "progress-cancel":
+            self.cancel_event.set()
+            event.button.disabled = True
+            self._append_log("[yellow]Cancelling (the current step must finish first)...[/yellow]")
+        elif event.button.id == "progress-quit":
+            self.app.exit()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.state == WorkerState.SUCCESS:
+            if self.cancel_event.is_set():
+                self._append_log(
+                    "[yellow]The run completed before it could be cancelled.[/yellow]"
+                )
             self.app.push_screen(ResultsScreen())
         elif event.state == WorkerState.ERROR:
-            err = str(event.worker.error) if event.worker.error else "Unknown error"
-            self._append_log(f"[bold red]ERROR:[/bold red] {err}")
-            self.query_one("#progress-title", Static).update("Failed")
+            self.query_one("#progress-quit", Button).disabled = False
+            error = event.worker.error
+            if isinstance(error, Cancelled):
+                self.query_one("#progress-title", Static).update("Cancelled")
+                self._append_log("[yellow]Cancelled. No backup was written.[/yellow]")
+            else:
+                err = str(error) if error else "Unknown error"
+                self._append_log(f"[bold red]ERROR:[/bold red] {err}")
+                self.query_one("#progress-title", Static).update("Failed")
 
 
 class ResultsScreen(Screen):

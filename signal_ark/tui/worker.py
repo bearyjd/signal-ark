@@ -2,11 +2,46 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Callable
 
 from signal_ark.tui.app import WizardState
+
+
+class Cancelled(Exception):
+    """Raised when the user cancels a running build/inspect."""
+
+
+def _check_cancel(cancel: threading.Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise Cancelled("Cancelled by user")
+
+
+def _snapshot_files(files_dir: Path) -> frozenset[Path]:
+    """Paths present under files_dir before this run writes anything."""
+    if not files_dir.exists():
+        return frozenset()
+    return frozenset(files_dir.rglob("*"))
+
+
+def _discard_new_files(files_dir: Path, before: frozenset[Path], preexisted: bool) -> None:
+    """Remove only what this cancelled run wrote; leave pre-existing files alone."""
+    if not files_dir.exists():
+        return
+    if not preexisted:
+        shutil.rmtree(files_dir, ignore_errors=True)
+        return
+    new_paths = sorted(set(files_dir.rglob("*")) - before, reverse=True)
+    for path in new_paths:
+        if path.is_symlink():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
 
 
 def run_preview(state: WizardState) -> dict[str, int]:
@@ -65,14 +100,21 @@ def run_preview(state: WizardState) -> dict[str, int]:
 def run_build(
     state: WizardState,
     on_log: Callable[[str], None],
+    cancel: threading.Event | None = None,
 ) -> dict[str, int]:
-    """Execute a full build and return stats."""
+    """Execute a full build and return stats.
+
+    Cancellation is cooperative: checkpoints run between steps. A single
+    step already in progress (metadata decrypt, seed decrypt, or the
+    map_desktop_to_frames call) cannot be interrupted and finishes first.
+    """
     from signal_ark.decrypt import decrypt_main, parse_frames
     from signal_ark.encrypt import write_backup_directory
     from signal_ark.kdf import aep_to_backup_key, backup_key_to_message_backup_key, validate_aep
     from signal_ark.mapping import map_desktop_to_frames
     from signal_ark.metadata import decrypt_metadata
 
+    _check_cancel(cancel)
     aep = validate_aep(state.passphrase)
     backup_key = aep_to_backup_key(aep)
     on_log("Derived backup key.")
@@ -82,6 +124,7 @@ def run_build(
     hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
     on_log(f"Decrypted seed metadata (version {meta.version}).")
 
+    _check_cancel(cancel)
     seed_plaintext = decrypt_main((state.seed_dir / "main").read_bytes(), hmac_key, aes_key)
     seed_result = parse_frames(seed_plaintext)
     on_log(f"Parsed seed: {len(seed_result.frames)} frames.")
@@ -97,19 +140,27 @@ def run_build(
 
     assert state.output_dir is not None
     files_dir = state.output_dir / "files"
+    files_dir_preexisted = files_dir.exists()
+    files_before = _snapshot_files(files_dir)
+    _check_cancel(cancel)
     on_log("Mapping Desktop data to backup frames...")
 
     assert state.desktop_db is not None
     assert state.attachments_dir is not None
-    result = map_desktop_to_frames(
-        db_path=state.desktop_db,
-        attachments_dir=state.attachments_dir,
-        seed_backup_info=seed_result.backup_info,
-        seed_account_frame=seed_account_frame,
-        seed_frames=seed_result.frames,
-        self_aci=state.self_aci,
-        output_files_dir=files_dir,
-    )
+    try:
+        result = map_desktop_to_frames(
+            db_path=state.desktop_db,
+            attachments_dir=state.attachments_dir,
+            seed_backup_info=seed_result.backup_info,
+            seed_account_frame=seed_account_frame,
+            seed_frames=seed_result.frames,
+            self_aci=state.self_aci,
+            output_files_dir=files_dir,
+        )
+        _check_cancel(cancel)
+    except Cancelled:
+        _discard_new_files(files_dir, files_before, files_dir_preexisted)
+        raise
 
     on_log(f"Mapped: {result.stats}")
 
@@ -139,12 +190,18 @@ def run_build(
 def run_inspect(
     state: WizardState,
     on_log: Callable[[str], None],
+    cancel: threading.Event | None = None,
 ) -> dict[str, int]:
-    """Inspect a backup and return frame stats."""
+    """Inspect a backup and return frame stats.
+
+    Cancellation is cooperative: checkpoints run between steps, so a step
+    already in progress (e.g. decrypting the main file) finishes first.
+    """
     from signal_ark.decrypt import decrypt_main, parse_frames
     from signal_ark.kdf import aep_to_backup_key, backup_key_to_message_backup_key, validate_aep
     from signal_ark.metadata import decrypt_metadata
 
+    _check_cancel(cancel)
     aep = validate_aep(state.passphrase)
     backup_key = aep_to_backup_key(aep)
 
@@ -153,7 +210,9 @@ def run_inspect(
     hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
     on_log(f"BackupId: {meta.backup_id.hex()}")
 
+    _check_cancel(cancel)
     plaintext = decrypt_main((state.seed_dir / "main").read_bytes(), hmac_key, aes_key)
+    _check_cancel(cancel)
     result = parse_frames(plaintext)
     on_log(f"BackupInfo version: {result.backup_info.version}")
 

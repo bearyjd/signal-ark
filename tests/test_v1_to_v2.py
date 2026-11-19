@@ -397,3 +397,62 @@ def test_v1_long_text_without_body_counts_stat() -> None:
         body=None, ct="text/x-signal-plain", data_size=len(data), data=data
     )
     assert result.stats["long_text_without_body"] == 1
+
+
+def test_v1_thread_ids_do_not_collide_with_recipient_ids() -> None:
+    """Thread _id keyspace must stay separate from v1 recipient _id keyspace.
+
+    thread 1 -> recipient 2 and thread 2 -> recipient 1: aliasing thread ids
+    into the recipient map would make thread 2 resolve to the wrong recipient.
+    """
+    alice = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    bob = "11111111-2222-3333-4444-555555555555"
+    rec_ins = "INSERT INTO recipient VALUES (?, ?, ?, ?, ?, ?, ?)"
+    sms_ins = "INSERT INTO sms VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    stmts = [
+        ("CREATE TABLE recipient (_id INTEGER PRIMARY KEY, aci TEXT, e164 TEXT, "
+         "profile_joined_name TEXT, blocked INTEGER DEFAULT 0, group_id TEXT, "
+         "group_type INTEGER DEFAULT 0)", []),
+        (rec_ins, [1, alice, "+15551234567", "Alice", 0, None, 0]),
+        (rec_ins, [2, bob, "+15559876543", "Bob", 0, None, 0]),
+        ("CREATE TABLE thread (_id INTEGER PRIMARY KEY, recipient_id INTEGER, "
+         "archived INTEGER DEFAULT 0)", []),
+        ("INSERT INTO thread VALUES (?, ?, ?)", [1, 2, 0]),  # thread 1 -> Bob
+        ("INSERT INTO thread VALUES (?, ?, ?)", [2, 1, 0]),  # thread 2 -> Alice
+        ("CREATE TABLE sms (_id INTEGER PRIMARY KEY, thread_id INTEGER, address TEXT, "
+         "type INTEGER, body TEXT, date INTEGER, date_received INTEGER, "
+         "read INTEGER DEFAULT 0)", []),
+        (sms_ins, [100, 1, "2", 1, "from bob", 1700000001000, 1700000001000, 1]),
+        (sms_ins, [101, 2, "1", 1, "from alice", 1700000002000, 1700000002000, 1]),
+        (sms_ins, [102, 1, "2", 23, "to bob", 1700000003000, 1700000003000, 1]),
+        (sms_ins, [103, 2, "1", 23, "to alice", 1700000004000, 1700000004000, 1]),
+    ]
+    seed_info, seed_account = _make_seed()
+    with tempfile.NamedTemporaryFile(suffix=".backup", delete=False) as f:
+        f.write(build_synthetic_v1_backup(sql_statements=stmts))
+        v1_path = Path(f.name)
+    try:
+        result = convert_v1_to_v2(
+            v1_path=v1_path,
+            v1_passphrase=TEST_PASSPHRASE,
+            seed_backup_info=seed_info,
+            seed_account_frame=seed_account,
+            self_aci="00000000-0000-0000-0000-000000000000",
+        )
+    finally:
+        v1_path.unlink()
+
+    rid_by_e164 = {
+        f.recipient.contact.e164: f.recipient.id
+        for f in result.frames
+        if f.HasField("recipient") and f.recipient.HasField("contact")
+    }
+    alice_rid, bob_rid = rid_by_e164[15551234567], rid_by_e164[15559876543]
+    chats = [f.chat for f in result.frames if f.HasField("chat")]
+    # chats allocated in thread order: thread 1 (Bob), thread 2 (Alice)
+    assert [c.recipientId for c in chats] == [bob_rid, alice_rid]
+    items = {i.chatItem.dateSent: i.chatItem for i in result.frames if i.HasField("chatItem")}
+    assert items[1700000001000].authorId == bob_rid
+    assert items[1700000002000].authorId == alice_rid
+    assert items[1700000003000].outgoing.sendStatus[0].recipientId == bob_rid
+    assert items[1700000004000].outgoing.sendStatus[0].recipientId == alice_rid

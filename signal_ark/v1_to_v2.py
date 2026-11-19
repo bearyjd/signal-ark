@@ -401,7 +401,7 @@ def _map_chats(
             continue
 
         chat_id = ids.alloc_chat(thread_id)
-        ids.alias_conversation(thread_id, recipient_id)
+        ids.alias_thread(thread_id, recipient_id)
 
         frame = Frame()
         frame.chat.id = chat_id
@@ -589,7 +589,7 @@ def _build_chat_item_from_v1(
     if is_incoming:
         # Try to resolve author from address/recipient_id
         address = msg.get("address") or msg.get("recipient_id")
-        author_rid = ids.conversation_to_recipient.get(str(address)) if address else None
+        author_rid = ids.recipient_for_conversation(str(address)) if address else None
         item.authorId = author_rid or 0
 
         incoming = item.incoming
@@ -602,7 +602,7 @@ def _build_chat_item_from_v1(
         outgoing = item.outgoing
         outgoing.dateReceived = int(date_received)
         ss = SendStatus()
-        ss.recipientId = ids.conversation_to_recipient.get(thread_id, 0)
+        ss.recipientId = ids.recipient_for_thread(thread_id) or 0
         ss.sent.sealedSender = False
         outgoing.sendStatus.append(ss)
 

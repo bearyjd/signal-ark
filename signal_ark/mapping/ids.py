@@ -46,6 +46,14 @@ class IdAllocator:
         canonical = _normalize_aci(service_id)
         return self.service_id_to_recipient.get(canonical) if canonical else None
 
+    def alias_conversation(self, conversation_id: str, rid: int) -> None:
+        """Map an additional conversation ID onto an existing recipient ID."""
+        self.conversation_to_recipient[conversation_id] = rid
+
+    def recipient_for_conversation(self, conversation_id: str) -> int | None:
+        """Recipient ID for a conversation ID, or None when unknown."""
+        return self.conversation_to_recipient.get(conversation_id)
+
     def alloc_chat(self, conversation_id: str) -> int:
         cid = self._next_chat_id
         self._next_chat_id += 1

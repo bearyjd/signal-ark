@@ -233,6 +233,15 @@ def test_alias_service_id_maps_to_existing_recipient() -> None:
     assert ids.service_id_to_recipient["aci-real"] == rid
 
 
+def test_alias_conversation_shares_recipient_and_resolves() -> None:
+    ids = IdAllocator()
+    rid = ids.alloc_recipient("v1-recipient-7")
+    ids.alias_conversation("thread-3", rid)
+    assert ids.recipient_for_conversation("thread-3") == rid
+    assert ids.recipient_for_conversation("v1-recipient-7") == rid
+    assert ids.recipient_for_conversation("missing") is None
+
+
 # --- M3: _find_attachment_target never falls back to dateSent ---
 
 

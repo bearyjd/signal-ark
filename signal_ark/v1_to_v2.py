@@ -391,12 +391,12 @@ def _map_chats(
         if not v1_recipient_id:
             continue
 
-        recipient_id = ids.conversation_to_recipient.get(v1_recipient_id)
+        recipient_id = ids.recipient_for_conversation(v1_recipient_id)
         if recipient_id is None:
             continue
 
         chat_id = ids.alloc_chat(thread_id)
-        ids.conversation_to_recipient[thread_id] = recipient_id
+        ids.alias_conversation(thread_id, recipient_id)
 
         frame = Frame()
         frame.chat.id = chat_id

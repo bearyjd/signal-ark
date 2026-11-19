@@ -6,9 +6,11 @@ import os
 import stat
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from signal_ark.cli import main as cli_main
+from signal_ark.fsutil import open_private
 from tests.helpers.synthetic_seed import default_account_frame, synthetic_seed_dir
 
 
@@ -53,3 +55,26 @@ def test_decrypt_rerun_tightens_existing_0644_files(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     for name in names:
         assert stat.S_IMODE((out / name).stat().st_mode) == 0o600, name
+
+
+def test_open_private_works_without_fchmod(tmp_path: Path, monkeypatch) -> None:
+    """Windows (Python < 3.13) has no os.fchmod; open_private must not need it."""
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    path = tmp_path / "f"
+    with os.fdopen(open_private(path), "wb") as f:
+        f.write(b"x")
+    assert path.read_bytes() == b"x"
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW unavailable")
+def test_open_private_refuses_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.write_text("keep")
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported")
+    with pytest.raises(OSError):
+        open_private(link)
+    assert target.read_text() == "keep"

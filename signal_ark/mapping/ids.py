@@ -16,6 +16,8 @@ class IdAllocator:
     conversation_to_recipient: dict[str, int] = field(default_factory=dict)
     # Desktop conversation ID → our chat ID
     conversation_to_chat: dict[str, int] = field(default_factory=dict)
+    # v1 thread _id → recipient ID (separate keyspace from conversation IDs)
+    thread_to_recipient: dict[str, int] = field(default_factory=dict)
     # serviceId (ACI) → recipient ID
     service_id_to_recipient: dict[str, int] = field(default_factory=dict)
     # Desktop conversation IDs whose recipient is a Group (never a valid author)
@@ -53,6 +55,14 @@ class IdAllocator:
     def recipient_for_conversation(self, conversation_id: str) -> int | None:
         """Recipient ID for a conversation ID, or None when unknown."""
         return self.conversation_to_recipient.get(conversation_id)
+
+    def alias_thread(self, thread_id: str, rid: int) -> None:
+        """Map a v1 thread _id onto a recipient ID without touching conversation IDs."""
+        self.thread_to_recipient[thread_id] = rid
+
+    def recipient_for_thread(self, thread_id: str) -> int | None:
+        """Recipient ID for a v1 thread _id, or None when unknown."""
+        return self.thread_to_recipient.get(thread_id)
 
     def alloc_chat(self, conversation_id: str) -> int:
         cid = self._next_chat_id

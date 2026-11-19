@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import click
@@ -23,6 +25,34 @@ from signal_ark.kdf import (
 from signal_ark.metadata import decrypt_metadata
 
 
+def _read_passphrase(passphrase: str | None, passphrase_file: Path | None) -> str:
+    """Resolve the AEP from --passphrase / $SIGNAL_ARK_PASSPHRASE / --passphrase-file (- = stdin)."""
+    if passphrase:
+        return passphrase
+    if passphrase_file is not None:
+        text = sys.stdin.read() if str(passphrase_file) == "-" else passphrase_file.read_text()
+        text = text.strip()
+        if text:
+            return text
+        raise click.ClickException("Passphrase file/stdin was empty")
+    raise click.UsageError(
+        "Missing passphrase: set SIGNAL_ARK_PASSPHRASE or use --passphrase-file (- for stdin)"
+    )
+
+
+def passphrase_options(f: Callable) -> Callable:
+    """Add --passphrase (or env), --passphrase-file and --show-keys to a command."""
+    f = click.option("--show-keys", is_flag=True,
+                     help="Print derived key material (secret) to stdout")(f)
+    f = click.option("--passphrase-file", type=click.Path(allow_dash=True, path_type=Path),
+                     default=None, help="Read AEP from file, or '-' for stdin")(f)
+    return click.option(
+        "--passphrase", envvar="SIGNAL_ARK_PASSPHRASE", default=None,
+        help="64-char AccountEntropyPool (visible in process list; prefer "
+             "$SIGNAL_ARK_PASSPHRASE or --passphrase-file)",
+    )(f)
+
+
 @click.group()
 def main() -> None:
     """signal-ark: Signal v2 backup tools."""
@@ -30,16 +60,24 @@ def main() -> None:
 
 @main.command()
 @click.option("--seed-dir", required=True, type=click.Path(exists=True, path_type=Path))
-@click.option("--passphrase", required=True, help="64-char AccountEntropyPool")
+@passphrase_options
 @click.option("--aci", default=None, help="ACI UUID (auto-detected from metadata if omitted)")
 @click.option("--output", "-o", default="decrypted", type=click.Path(path_type=Path))
-def decrypt(seed_dir: Path, passphrase: str, aci: str | None, output: Path) -> None:
+def decrypt(
+    seed_dir: Path,
+    passphrase: str | None,
+    passphrase_file: Path | None,
+    show_keys: bool,
+    aci: str | None,
+    output: Path,
+) -> None:
     """Decrypt a v2 backup seed directory."""
     output.mkdir(parents=True, exist_ok=True)
 
-    aep = validate_aep(passphrase)
+    aep = validate_aep(_read_passphrase(passphrase, passphrase_file))
     backup_key = aep_to_backup_key(aep)
-    click.echo(f"BackupKey: {backup_key.hex()}")
+    if show_keys:
+        click.echo(f"BackupKey: {backup_key.hex()}")
 
     metadata_path = seed_dir / "metadata"
     if not metadata_path.exists():
@@ -53,8 +91,9 @@ def decrypt(seed_dir: Path, passphrase: str, aci: str | None, output: Path) -> N
     click.echo(f"Wrote {output / 'metadata.json'}")
 
     hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
-    click.echo(f"HMAC key:  {hmac_key.hex()}")
-    click.echo(f"AES key:   {aes_key.hex()}")
+    if show_keys:
+        click.echo(f"HMAC key:  {hmac_key.hex()}")
+        click.echo(f"AES key:   {aes_key.hex()}")
 
     main_path = seed_dir / "main"
     if not main_path.exists():
@@ -94,7 +133,7 @@ def decrypt(seed_dir: Path, passphrase: str, aci: str | None, output: Path) -> N
 
 @main.command()
 @click.option("--seed-dir", required=True, type=click.Path(exists=True, path_type=Path))
-@click.option("--passphrase", required=True, help="64-char AccountEntropyPool")
+@passphrase_options
 @click.option("--desktop-db", required=True, type=click.Path(exists=True, path_type=Path),
               help="Decrypted Signal Desktop SQLite database")
 @click.option("--attachments-dir", required=True, type=click.Path(exists=True, path_type=Path),
@@ -104,7 +143,9 @@ def decrypt(seed_dir: Path, passphrase: str, aci: str | None, output: Path) -> N
 @click.option("--self-aci", required=True, help="Your ACI UUID (from Desktop items table)")
 def build(
     seed_dir: Path,
-    passphrase: str,
+    passphrase: str | None,
+    passphrase_file: Path | None,
+    show_keys: bool,
     desktop_db: Path,
     attachments_dir: Path,
     output: Path,
@@ -114,12 +155,13 @@ def build(
     from signal_ark.encrypt import write_backup_directory
     from signal_ark.mapping import map_desktop_to_frames
 
-    aep = validate_aep(passphrase)
+    aep = validate_aep(_read_passphrase(passphrase, passphrase_file))
     backup_key = aep_to_backup_key(aep)
     meta = decrypt_metadata(seed_dir / "metadata", backup_key)
     hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
 
-    click.echo(f"BackupKey: {backup_key.hex()}")
+    if show_keys:
+        click.echo(f"BackupKey: {backup_key.hex()}")
     click.echo(f"BackupId:  {meta.backup_id.hex()}")
 
     # Decrypt seed to get BackupInfo and AccountData
@@ -174,14 +216,20 @@ def build(
 @main.command()
 @click.option("--backup-dir", required=True, type=click.Path(exists=True, path_type=Path),
               help="Backup directory containing main, metadata, files")
-@click.option("--passphrase", required=True, help="64-char AccountEntropyPool")
+@passphrase_options
 @click.option("--files-dir", default=None, type=click.Path(exists=True, path_type=Path),
               help="Attachment content store (files/ directory with XX/ shards)")
-def inspect(backup_dir: Path, passphrase: str, files_dir: Path | None) -> None:
+def inspect(
+    backup_dir: Path,
+    passphrase: str | None,
+    passphrase_file: Path | None,
+    show_keys: bool,
+    files_dir: Path | None,
+) -> None:
     """Inspect a v2 backup: validate structure, check attachments, report issues."""
     import hashlib
 
-    aep = validate_aep(passphrase)
+    aep = validate_aep(_read_passphrase(passphrase, passphrase_file))
     backup_key = aep_to_backup_key(aep)
     meta = decrypt_metadata(backup_dir / "metadata", backup_key)
     hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
@@ -334,7 +382,7 @@ def dump_v1(v1_backup: Path, v1_passphrase: str, output: Path) -> None:
 @click.option("--v1-passphrase", required=True, help="30-digit v1 backup passphrase")
 @click.option("--seed-dir", required=True, type=click.Path(exists=True, path_type=Path),
               help="v2 seed backup directory (provides AccountData)")
-@click.option("--passphrase", required=True, help="64-char AccountEntropyPool for output")
+@passphrase_options
 @click.option("--self-aci", required=True, help="Your ACI UUID")
 @click.option("--output", "-o", required=True, type=click.Path(path_type=Path),
               help="Output directory for rebuilt v2 backup")
@@ -342,7 +390,9 @@ def import_v1(
     v1_backup: Path,
     v1_passphrase: str,
     seed_dir: Path,
-    passphrase: str,
+    passphrase: str | None,
+    passphrase_file: Path | None,
+    show_keys: bool,
     self_aci: str,
     output: Path,
 ) -> None:
@@ -350,12 +400,13 @@ def import_v1(
     from signal_ark.encrypt import write_backup_directory
     from signal_ark.v1_to_v2 import convert_v1_to_v2
 
-    aep = validate_aep(passphrase)
+    aep = validate_aep(_read_passphrase(passphrase, passphrase_file))
     backup_key = aep_to_backup_key(aep)
     meta = decrypt_metadata(seed_dir / "metadata", backup_key)
     hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
 
-    click.echo(f"BackupKey: {backup_key.hex()}")
+    if show_keys:
+        click.echo(f"BackupKey: {backup_key.hex()}")
     click.echo(f"BackupId:  {meta.backup_id.hex()}")
 
     seed_plaintext = decrypt_main((seed_dir / "main").read_bytes(), hmac_key, aes_key)

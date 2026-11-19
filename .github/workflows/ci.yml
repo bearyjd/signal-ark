@@ -34,4 +34,4 @@ jobs:
       - name: Install validator deps
         run: npm ci --ignore-scripts --prefix tools/validator
       - name: Test
-        run: uv run --all-extras pytest
+        run: uv run --locked --all-extras pytest

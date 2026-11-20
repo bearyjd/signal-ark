@@ -10,6 +10,7 @@ from pathlib import Path
 
 import click
 
+from signal_ark.content_store import frame_stats, media_name, store_path
 from signal_ark.decrypt import (
     backup_info_to_dict,
     decrypt_main,
@@ -27,9 +28,32 @@ from signal_ark.fsutil import ensure_private_dir, open_private, write_private_by
 from signal_ark.metadata import decrypt_metadata
 
 
+def _warn_if_argv(param: str, flag: str) -> None:
+    """Warn when a secret was supplied on the command line (visible in the process list)."""
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None and ctx.get_parameter_source(param) is click.core.ParameterSource.COMMANDLINE:
+        click.echo(
+            f"Warning: {flag} is deprecated (secrets on the command line are visible in the "
+            "process list); use the environment variable or the hidden prompt instead.",
+            err=True,
+        )
+
+
+def _read_v1_passphrase(v1_passphrase: str | None) -> str:
+    """Resolve the v1 passphrase from --v1-passphrase / $SIGNAL_ARK_V1_PASSPHRASE / hidden prompt."""
+    if v1_passphrase:
+        _warn_if_argv("v1_passphrase", "--v1-passphrase")
+        return v1_passphrase
+    return click.prompt("v1 backup passphrase (30 digits)", hide_input=True)
+
+
 def _read_passphrase(passphrase: str | None, passphrase_file: Path | None) -> str:
-    """Resolve the AEP from --passphrase / $SIGNAL_ARK_PASSPHRASE / --passphrase-file (- = stdin)."""
+    """Resolve the AEP from --passphrase / $SIGNAL_ARK_PASSPHRASE / --passphrase-file (- = stdin).
+
+    Falls back to a hidden prompt when none is given.
+    """
     if passphrase:
+        _warn_if_argv("passphrase", "--passphrase")
         return passphrase
     if passphrase_file is not None:
         text = sys.stdin.read() if str(passphrase_file) == "-" else passphrase_file.read_text()
@@ -37,9 +61,7 @@ def _read_passphrase(passphrase: str | None, passphrase_file: Path | None) -> st
         if text:
             return text
         raise click.ClickException("Passphrase file/stdin was empty")
-    raise click.UsageError(
-        "Missing passphrase: set SIGNAL_ARK_PASSPHRASE or use --passphrase-file (- for stdin)"
-    )
+    return click.prompt("AEP passphrase (64 chars)", hide_input=True)
 
 
 def passphrase_options(f: Callable) -> Callable:
@@ -50,8 +72,8 @@ def passphrase_options(f: Callable) -> Callable:
                      default=None, help="Read AEP from file, or '-' for stdin")(f)
     return click.option(
         "--passphrase", envvar="SIGNAL_ARK_PASSPHRASE", default=None,
-        help="64-char AccountEntropyPool (visible in process list; prefer "
-             "$SIGNAL_ARK_PASSPHRASE or --passphrase-file)",
+        help="DEPRECATED: 64-char AccountEntropyPool (visible in process list; use "
+             "$SIGNAL_ARK_PASSPHRASE, --passphrase-file, or the hidden prompt)",
     )(f)
 
 
@@ -243,18 +265,7 @@ def inspect(
     result = parse_frames(seed_plaintext)
     click.echo(f"BackupInfo version: {result.backup_info.version}")
 
-    # Frame stats
-    type_counts: dict[str, int] = {}
-    file_pointers: list[tuple[str, object]] = []
-    for frame in result.frames:
-        item_type = frame.WhichOneof("item") or "unknown"
-        type_counts[item_type] = type_counts.get(item_type, 0) + 1
-        if item_type == "chatItem":
-            ci = frame.chatItem
-            if ci.HasField("standardMessage"):
-                for ma in ci.standardMessage.attachments:
-                    fp = ma.pointer
-                    file_pointers.append((str(ci.dateSent), fp))
+    type_counts, file_pointers = frame_stats(result.frames)
 
     click.echo(f"\nFrame counts:")
     for t, c in sorted(type_counts.items()):
@@ -294,8 +305,7 @@ def inspect(
     if files_dir and manifest_names:
         missing_files = 0
         for name in manifest_names:
-            shard = name[:2]
-            if not (files_dir / shard / name).exists():
+            if not store_path(files_dir, name).exists():
                 missing_files += 1
         if missing_files:
             issues.append(f"{missing_files}/{len(manifest_names)} manifest entries have no file in content store")
@@ -309,11 +319,10 @@ def inspect(
             li = fp.locatorInfo
             if not li.localKey or not li.plaintextHash:
                 continue
-            media_name = hashlib.sha256(bytes(li.plaintextHash) + bytes(li.localKey)).hexdigest()
-            shard = media_name[:2]
-            fpath = files_dir / shard / media_name
+            name = media_name(li.plaintextHash, li.localKey)
+            fpath = store_path(files_dir, name)
             if not fpath.exists():
-                click.echo(f"  [{sent_at}] {fp.contentType} — FILE MISSING ({media_name[:16]}...)")
+                click.echo(f"  [{sent_at}] {fp.contentType} — FILE MISSING ({name[:16]}...)")
                 continue
             try:
                 from cryptography.hazmat.primitives import hashes as _h, hmac as _hmac, padding
@@ -353,15 +362,18 @@ def inspect(
 @main.command(name="dump-v1")
 @click.option("--v1-backup", required=True, type=click.Path(exists=True, path_type=Path),
               help="Path to v1 .backup file")
-@click.option("--v1-passphrase", required=True, help="30-digit v1 backup passphrase")
+@click.option("--v1-passphrase", envvar="SIGNAL_ARK_V1_PASSPHRASE", default=None,
+              help="DEPRECATED: 30-digit v1 passphrase (visible in process list; use "
+                   "$SIGNAL_ARK_V1_PASSPHRASE or the hidden prompt)")
 @click.option("--output", "-o", default="v1-dump", type=click.Path(path_type=Path),
               help="Output directory for JSONL dump")
-def dump_v1(v1_backup: Path, v1_passphrase: str, output: Path) -> None:
+def dump_v1(v1_backup: Path, v1_passphrase: str | None, output: Path) -> None:
     """Decrypt and dump a v1 backup as JSONL for debugging."""
     from google.protobuf.json_format import MessageToDict
 
     from signal_ark.v1_parser import parse_v1_backup
 
+    v1_passphrase = _read_v1_passphrase(v1_passphrase)
     ensure_private_dir(output)
     outfile = output / "v1-frames.jsonl"
 
@@ -381,7 +393,9 @@ def dump_v1(v1_backup: Path, v1_passphrase: str, output: Path) -> None:
 @main.command(name="import-v1")
 @click.option("--v1-backup", required=True, type=click.Path(exists=True, path_type=Path),
               help="Path to v1 .backup file")
-@click.option("--v1-passphrase", required=True, help="30-digit v1 backup passphrase")
+@click.option("--v1-passphrase", envvar="SIGNAL_ARK_V1_PASSPHRASE", default=None,
+              help="DEPRECATED: 30-digit v1 passphrase (visible in process list; use "
+                   "$SIGNAL_ARK_V1_PASSPHRASE or the hidden prompt)")
 @click.option("--seed-dir", required=True, type=click.Path(exists=True, path_type=Path),
               help="v2 seed backup directory (provides AccountData)")
 @passphrase_options
@@ -390,7 +404,7 @@ def dump_v1(v1_backup: Path, v1_passphrase: str, output: Path) -> None:
               help="Output directory for rebuilt v2 backup")
 def import_v1(
     v1_backup: Path,
-    v1_passphrase: str,
+    v1_passphrase: str | None,
     seed_dir: Path,
     passphrase: str | None,
     passphrase_file: Path | None,
@@ -402,6 +416,7 @@ def import_v1(
     from signal_ark.encrypt import write_backup_directory
     from signal_ark.v1_to_v2 import convert_v1_to_v2
 
+    v1_passphrase = _read_v1_passphrase(v1_passphrase)
     aep = validate_aep(_read_passphrase(passphrase, passphrase_file))
     backup_key = aep_to_backup_key(aep)
     meta = decrypt_metadata(seed_dir / "metadata", backup_key)

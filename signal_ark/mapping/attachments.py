@@ -11,6 +11,7 @@ from pathlib import Path
 from signal_ark.fsutil import ensure_private_dir, write_private_bytes
 from typing import NamedTuple
 
+from signal_ark.content_store import media_name, store_path
 from signal_ark.mapping.chats import _map_reactions
 from signal_ark.mapping.ids import IdAllocator
 from signal_ark.mapping.util import (
@@ -227,16 +228,15 @@ def encrypt_attachment(
     encrypted = iv + ciphertext + mac
 
     # Media name = SHA256(plaintextHash || localKey)
-    media_name = hashlib.sha256(plaintext_hash + local_key).hexdigest()
+    name = media_name(plaintext_hash, local_key)
 
     # Write to sharded directory
-    shard = media_name[:2]
-    shard_dir = output_files_dir / shard
-    ensure_private_dir(shard_dir)
-    write_private_bytes(shard_dir / media_name, encrypted)
+    dest = store_path(output_files_dir, name)
+    ensure_private_dir(dest.parent)
+    write_private_bytes(dest, encrypted)
 
     local_key_b64 = base64.b64encode(local_key).decode()
-    return EncryptedAttachment(local_key_b64, media_name, plaintext_hash, hash_mismatch)
+    return EncryptedAttachment(local_key_b64, name, plaintext_hash, hash_mismatch)
 
 
 def _is_attachable_chat_item(frame: Frame) -> bool:

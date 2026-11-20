@@ -197,6 +197,7 @@ def run_inspect(
     Cancellation is cooperative: checkpoints run between steps, so a step
     already in progress (e.g. decrypting the main file) finishes first.
     """
+    from signal_ark.content_store import frame_stats
     from signal_ark.decrypt import decrypt_main, parse_frames
     from signal_ark.kdf import aep_to_backup_key, backup_key_to_message_backup_key, validate_aep
     from signal_ark.metadata import decrypt_metadata
@@ -216,10 +217,8 @@ def run_inspect(
     result = parse_frames(plaintext)
     on_log(f"BackupInfo version: {result.backup_info.version}")
 
-    stats: dict[str, int] = {"total_frames": len(result.frames)}
-    for frame in result.frames:
-        t = frame.WhichOneof("item") or "unknown"
-        stats[t] = stats.get(t, 0) + 1
+    type_counts, _pointers = frame_stats(result.frames)
+    stats: dict[str, int] = {"total_frames": len(result.frames), **type_counts}
 
     for t, c in sorted(stats.items()):
         on_log(f"  {t:25s} {c}")

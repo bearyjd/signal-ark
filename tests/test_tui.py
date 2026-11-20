@@ -51,6 +51,15 @@ async def test_welcome_screen_has_radio_options() -> None:
 
 
 @pytest.mark.asyncio
+async def test_welcome_import_v1_radio_enabled() -> None:
+    app = SignalArkApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        buttons = list(app.screen.query_one(RadioSet).query("RadioButton"))
+        assert not buttons[2].disabled
+
+
+@pytest.mark.asyncio
 async def test_welcome_next_sets_build_mode() -> None:
     app = SignalArkApp()
     async with app.run_test() as pilot:
@@ -506,3 +515,180 @@ def test_run_build_cancel_removes_new_symlink(tmp_path, monkeypatch) -> None:
         run_build(state, on_log=lambda _m: None, cancel=cancel)
     assert not (files / "link").is_symlink()
     assert target.exists()
+
+
+# --- import_v1 -------------------------------------------------------------
+
+_VALID_AEP = "a" * 64
+_VALID_V1_PASS = "123456789012345678901234567890"
+
+
+async def _open_v1_input(pilot, app):
+    await pilot.pause()
+    buttons = list(app.screen.query_one(RadioSet).query("RadioButton"))
+    buttons[2].toggle()
+    await pilot.pause()
+    await pilot.click("#welcome-next")
+    await pilot.pause()
+
+
+def _fill_v1(app, tmp_path, **overrides):
+    seed = tmp_path / "seed"
+    seed.mkdir(exist_ok=True)
+    v1 = tmp_path / "x.backup"
+    v1.write_bytes(b"")
+    values = {
+        "#input-seed-dir": str(seed),
+        "#input-v1-backup": str(v1),
+        "#input-v1-passphrase-input": _VALID_V1_PASS,
+        "#input-self-aci": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "#input-output-dir": str(tmp_path / "out"),
+    }
+    values.update(overrides)
+    for sel, val in values.items():
+        app.screen.query_one(sel, Input).value = val
+    app.screen.query_one("#input-passphrase-input", Input).value = _VALID_AEP
+
+
+@pytest.mark.asyncio
+async def test_input_screen_import_v1_fields() -> None:
+    app = SignalArkApp()
+    async with app.run_test(size=(100, 80)) as pilot:
+        await _open_v1_input(pilot, app)
+        assert app.wizard_state.mode == "import_v1"
+        ids = [i.id for i in app.screen.query(Input) if i.id]
+        for want in ("input-seed-dir", "input-v1-backup", "input-v1-passphrase-input",
+                     "input-self-aci", "input-output-dir"):
+            assert want in ids
+        assert "input-desktop-db" not in ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "override,message",
+    [
+        ({"#input-v1-backup": ""}, "v1 backup"),
+        ({"#input-v1-backup": "/nonexistent/x.backup"}, "not found"),
+        ({"#input-v1-passphrase-input": "123"}, "30 digits"),
+        ({"#input-v1-passphrase-input": "x" * 30}, "digits"),
+        ({"#input-self-aci": ""}, "ACI"),
+        ({"#input-output-dir": ""}, "Output"),
+    ],
+)
+async def test_import_v1_validation_errors(tmp_path, override, message) -> None:
+    from textual.widgets import Static
+
+    from signal_ark.tui.screens import InputScreen
+
+    app = SignalArkApp()
+    async with app.run_test(size=(100, 80)) as pilot:
+        await _open_v1_input(pilot, app)
+        _fill_v1(app, tmp_path, **override)
+        app.screen._validate_and_proceed()
+        await pilot.pause()
+        assert isinstance(app.screen, InputScreen)
+        assert message in str(app.screen.query_one("#input-error", Static).render())
+
+
+@pytest.mark.asyncio
+async def test_import_v1_valid_input_populates_state(tmp_path, monkeypatch) -> None:
+    import signal_ark.tui.worker as worker
+    from signal_ark.tui.screens import PreviewScreen
+
+    monkeypatch.setattr(worker, "run_preview", lambda _s: {})
+
+    app = SignalArkApp()
+    async with app.run_test(size=(100, 80)) as pilot:
+        await _open_v1_input(pilot, app)
+        _fill_v1(app, tmp_path)
+        app.screen._validate_and_proceed()
+        await pilot.pause()
+        assert isinstance(app.screen, PreviewScreen)
+        st = app.wizard_state
+        assert st.v1_backup_path == tmp_path / "x.backup"
+        assert st.v1_passphrase == _VALID_V1_PASS
+        assert st.output_dir == tmp_path / "out"
+
+
+def _patch_v1_convert(monkeypatch, convert_fn):
+    import signal_ark.v1_to_v2 as v1_to_v2
+
+    written = _patch_build_deps(monkeypatch, lambda **kw: None)
+    monkeypatch.setattr(v1_to_v2, "convert_v1_to_v2", convert_fn)
+    return written
+
+
+def _v1_state(tmp_path):
+    state = _build_state(tmp_path)
+    state.mode = "import_v1"
+    state.v1_backup_path = tmp_path / "x.backup"
+    state.v1_passphrase = _VALID_V1_PASS
+    state.self_aci = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    (state.seed_dir / "main").write_bytes(b"")
+    return state
+
+
+def test_run_import_v1_writes_backup(tmp_path, monkeypatch) -> None:
+    import threading
+    import types
+
+    from signal_ark.tui.worker import run_import_v1
+
+    seen = {}
+
+    def fake_convert(**kw):
+        seen.update(kw)
+        kw["progress_callback"]("messages", 3, 1)
+        return types.SimpleNamespace(stats={"messages": 3}, media_names=[], backup_info=None, frames=[])
+
+    written = _patch_v1_convert(monkeypatch, fake_convert)
+    state = _v1_state(tmp_path)
+    logs: list[str] = []
+    stats = run_import_v1(state, on_log=logs.append, cancel=threading.Event())
+    assert stats == {"messages": 3}
+    assert len(written) == 1
+    assert seen["v1_path"] == state.v1_backup_path
+    assert seen["v1_passphrase"] == _VALID_V1_PASS
+    assert seen["output_files_dir"] == state.output_dir / "files"
+    assert any("messages" in m and "processed=3" in m for m in logs)
+    assert state.result_output_dir == state.output_dir / "signal-backup-rebuilt"
+    assert state.result_stats == {"messages": 3}
+
+
+def test_run_import_v1_cancelled_before_start(tmp_path, monkeypatch) -> None:
+    import threading
+
+    from signal_ark.tui.worker import Cancelled, run_import_v1
+
+    called = []
+    _patch_v1_convert(monkeypatch, lambda **kw: called.append(1))
+    state = _v1_state(tmp_path)
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(Cancelled):
+        run_import_v1(state, on_log=lambda _m: None, cancel=cancel)
+    assert not called
+    assert not (state.output_dir / "files").exists()
+
+
+def test_run_import_v1_cancel_during_convert_discards_new_files(tmp_path, monkeypatch) -> None:
+    import threading
+    import types
+
+    from signal_ark.tui.worker import Cancelled, run_import_v1
+
+    state = _v1_state(tmp_path)
+    cancel = threading.Event()
+    files = state.output_dir / "files"
+
+    def fake_convert(**kw):
+        files.mkdir()
+        (files / "new.bin").write_bytes(b"x")
+        cancel.set()
+        return types.SimpleNamespace(stats={}, media_names=[], backup_info=None, frames=[])
+
+    written = _patch_v1_convert(monkeypatch, fake_convert)
+    with pytest.raises(Cancelled):
+        run_import_v1(state, on_log=lambda _m: None, cancel=cancel)
+    assert not files.exists()
+    assert not written

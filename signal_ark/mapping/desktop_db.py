@@ -147,3 +147,24 @@ def _collect_legacy_attachments(conn: sqlite3.Connection) -> list[dict]:
             })
 
     return result
+
+
+def count_preview(conn: sqlite3.Connection) -> dict[str, int]:
+    """Row counts for the TUI preview, using the same filters as the build pipeline."""
+    stats = {
+        "conversations": conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0],
+        "messages": conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE type IN ('incoming', 'outgoing', 'call-history')"
+        ).fetchone()[0],
+    }
+    try:
+        stats["attachments"] = conn.execute("""
+            SELECT COUNT(*)
+            FROM message_attachments ma
+            JOIN messages m ON m.id = ma.messageId
+            WHERE ma.path IS NOT NULL
+            AND m.type IN ('incoming', 'outgoing')
+        """).fetchone()[0]
+    except sqlite3.OperationalError:
+        stats["attachments"] = 0
+    return stats

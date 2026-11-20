@@ -47,6 +47,7 @@ def _discard_new_files(files_dir: Path, before: frozenset[Path], preexisted: boo
 def run_preview(state: WizardState) -> dict[str, int]:
     """Lightweight read-only preview: validate inputs, count data."""
     from signal_ark.kdf import aep_to_backup_key, validate_aep
+    from signal_ark.mapping.desktop_db import count_preview
     from signal_ark.metadata import decrypt_metadata
 
     stats: dict[str, int] = {}
@@ -62,18 +63,7 @@ def run_preview(state: WizardState) -> dict[str, int]:
         conn = sqlite3.connect(f"file:{state.desktop_db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
-            stats["conversations"] = conn.execute(
-                "SELECT COUNT(*) FROM conversations"
-            ).fetchone()[0]
-            stats["messages"] = conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE type IN ('incoming', 'outgoing')"
-            ).fetchone()[0]
-            try:
-                stats["attachments"] = conn.execute(
-                    "SELECT COUNT(*) FROM message_attachments WHERE path IS NOT NULL"
-                ).fetchone()[0]
-            except sqlite3.OperationalError:
-                stats["attachments"] = 0
+            stats.update(count_preview(conn))
         finally:
             conn.close()
 

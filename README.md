@@ -49,8 +49,9 @@ python -m signal_ark.cli decrypt \
   -o decrypted/
 ```
 
-`--passphrase` is visible in the process list. Prefer `SIGNAL_ARK_PASSPHRASE=...` in the
-environment, or `--passphrase-file PATH` (`-` reads stdin). Derived keys (BackupKey, HMAC/AES)
+`--passphrase` (and `--v1-passphrase`) are deprecated: they are visible in the process list and
+print a warning. Prefer `SIGNAL_ARK_PASSPHRASE=...` / `SIGNAL_ARK_V1_PASSPHRASE=...` in the
+environment, `--passphrase-file PATH` (`-` reads stdin), or omit them to get a hidden prompt. Derived keys (BackupKey, HMAC/AES)
 are no longer printed unless you pass `--show-keys`.
 
 Outputs: `metadata.json`, `main.plaintext`, `frames.jsonl`, `files_manifest.json`

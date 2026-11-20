@@ -10,6 +10,7 @@ from pathlib import Path
 
 import click
 
+from signal_ark.content_store import frame_stats, media_name, store_path
 from signal_ark.decrypt import (
     backup_info_to_dict,
     decrypt_main,
@@ -243,18 +244,7 @@ def inspect(
     result = parse_frames(seed_plaintext)
     click.echo(f"BackupInfo version: {result.backup_info.version}")
 
-    # Frame stats
-    type_counts: dict[str, int] = {}
-    file_pointers: list[tuple[str, object]] = []
-    for frame in result.frames:
-        item_type = frame.WhichOneof("item") or "unknown"
-        type_counts[item_type] = type_counts.get(item_type, 0) + 1
-        if item_type == "chatItem":
-            ci = frame.chatItem
-            if ci.HasField("standardMessage"):
-                for ma in ci.standardMessage.attachments:
-                    fp = ma.pointer
-                    file_pointers.append((str(ci.dateSent), fp))
+    type_counts, file_pointers = frame_stats(result.frames)
 
     click.echo(f"\nFrame counts:")
     for t, c in sorted(type_counts.items()):
@@ -294,8 +284,7 @@ def inspect(
     if files_dir and manifest_names:
         missing_files = 0
         for name in manifest_names:
-            shard = name[:2]
-            if not (files_dir / shard / name).exists():
+            if not store_path(files_dir, name).exists():
                 missing_files += 1
         if missing_files:
             issues.append(f"{missing_files}/{len(manifest_names)} manifest entries have no file in content store")
@@ -309,11 +298,10 @@ def inspect(
             li = fp.locatorInfo
             if not li.localKey or not li.plaintextHash:
                 continue
-            media_name = hashlib.sha256(bytes(li.plaintextHash) + bytes(li.localKey)).hexdigest()
-            shard = media_name[:2]
-            fpath = files_dir / shard / media_name
+            name = media_name(li.plaintextHash, li.localKey)
+            fpath = store_path(files_dir, name)
             if not fpath.exists():
-                click.echo(f"  [{sent_at}] {fp.contentType} — FILE MISSING ({media_name[:16]}...)")
+                click.echo(f"  [{sent_at}] {fp.contentType} — FILE MISSING ({name[:16]}...)")
                 continue
             try:
                 from cryptography.hazmat.primitives import hashes as _h, hmac as _hmac, padding

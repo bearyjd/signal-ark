@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+
+from signal_ark.fsutil import ensure_private_dir, write_private_bytes
 from typing import NamedTuple
 
 from signal_ark.content_store import media_name, store_path
@@ -230,8 +232,8 @@ def encrypt_attachment(
 
     # Write to sharded directory
     dest = store_path(output_files_dir, name)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(encrypted)
+    ensure_private_dir(dest.parent)
+    write_private_bytes(dest, encrypted)
 
     local_key_b64 = base64.b64encode(local_key).decode()
     return EncryptedAttachment(local_key_b64, name, plaintext_hash, hash_mismatch)

@@ -78,3 +78,54 @@ def test_open_private_refuses_symlink(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         open_private(link)
     assert target.read_text() == "keep"
+
+
+def _mode(p: Path) -> int:
+    return stat.S_IMODE(p.stat().st_mode)
+
+
+def test_decrypt_output_dir_is_owner_only(tmp_path: Path) -> None:
+    seed = synthetic_seed_dir(tmp_path / "seed", frames=[default_account_frame()])
+    out = tmp_path / "out"
+    out.mkdir(mode=0o755)
+    old_umask = os.umask(0o000)
+    try:
+        result = CliRunner().invoke(
+            cli_main,
+            ["decrypt", "--seed-dir", str(seed.dir), "--passphrase", seed.aep, "-o", str(out)],
+        )
+    finally:
+        os.umask(old_umask)
+    assert result.exit_code == 0, result.output
+    assert _mode(out) == 0o700
+
+
+def test_write_backup_directory_is_owner_only(tmp_path: Path) -> None:
+    from signal_ark.encrypt import write_backup_directory
+    from signal_ark.proto.Backup_pb2 import BackupInfo
+
+    out = tmp_path / "bk"
+    out.mkdir(mode=0o755)
+    old_umask = os.umask(0o000)
+    try:
+        write_backup_directory(
+            out, BackupInfo(), [], b"\x01" * 32, b"\x02" * 32,
+            backup_key=b"\x03" * 32, backup_id=b"\x04" * 16, media_names=["a"],
+        )
+    finally:
+        os.umask(old_umask)
+    assert _mode(out) == 0o700
+    for name in ("main", "metadata", "files"):
+        assert _mode(out / name) == 0o600, name
+
+
+def test_ensure_private_dir_tightens_existing(tmp_path: Path) -> None:
+    from signal_ark.fsutil import ensure_private_dir
+
+    d = tmp_path / "a" / "b"
+    old_umask = os.umask(0o000)
+    try:
+        ensure_private_dir(d)
+    finally:
+        os.umask(old_umask)
+    assert _mode(d) == 0o700

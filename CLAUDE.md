@@ -50,6 +50,10 @@ No `ruff`/`mypy` config exists yet. `mypy-protobuf` (dev dependency) only genera
 
 ## Architecture
 
+### Secret input
+
+Never take secrets from argv. AEP: `$SIGNAL_ARK_PASSPHRASE`, `--passphrase-file`, or hidden prompt. v1 passphrase: `$SIGNAL_ARK_V1_PASSPHRASE` or hidden prompt. `--passphrase`/`--v1-passphrase` still work but are deprecated and warn.
+
 ### Crypto pipeline (the core flow)
 
 ```

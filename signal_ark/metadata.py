@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from signal_ark.fsutil import write_private_bytes
+
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from signal_ark.kdf import backup_key_to_local_metadata_key
@@ -68,4 +70,4 @@ def write_metadata(output_path: Path, backup_key: bytes, backup_id: bytes, versi
     msg.backupId.iv = iv
     msg.backupId.encryptedId = encrypted_id
 
-    output_path.write_bytes(msg.SerializeToString())
+    write_private_bytes(output_path, msg.SerializeToString())

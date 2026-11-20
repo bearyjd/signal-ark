@@ -7,6 +7,8 @@ import io
 import os
 from pathlib import Path
 
+from signal_ark.fsutil import ensure_private_dir, write_private_bytes
+
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -81,14 +83,14 @@ def write_backup_directory(
     """Write a complete v2 backup directory (main, metadata, files manifest)."""
     from signal_ark.metadata import write_metadata
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(output_dir)
 
     plaintext = serialize_frames(backup_info, frames)
     main_data = encrypt_main(plaintext, hmac_key, aes_key)
-    (output_dir / "main").write_bytes(main_data)
+    write_private_bytes(output_dir / "main", main_data)
 
     write_metadata(output_dir / "metadata", backup_key, backup_id, version)
 
     if media_names is not None:
         manifest = serialize_files_manifest(media_names)
-        (output_dir / "files").write_bytes(manifest)
+        write_private_bytes(output_dir / "files", manifest)

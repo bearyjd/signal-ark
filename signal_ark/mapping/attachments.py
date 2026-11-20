@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+
+from signal_ark.fsutil import ensure_private_dir, write_private_bytes
 from typing import NamedTuple
 
 from signal_ark.mapping.chats import _map_reactions
@@ -230,8 +232,8 @@ def encrypt_attachment(
     # Write to sharded directory
     shard = media_name[:2]
     shard_dir = output_files_dir / shard
-    shard_dir.mkdir(parents=True, exist_ok=True)
-    (shard_dir / media_name).write_bytes(encrypted)
+    ensure_private_dir(shard_dir)
+    write_private_bytes(shard_dir / media_name, encrypted)
 
     local_key_b64 = base64.b64encode(local_key).decode()
     return EncryptedAttachment(local_key_b64, media_name, plaintext_hash, hash_mismatch)

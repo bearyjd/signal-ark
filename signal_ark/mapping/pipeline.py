@@ -8,6 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from signal_ark.fsutil import ensure_private_dir
+
 from signal_ark.mapping.attachments import _process_attachments
 from signal_ark.mapping.calls import build_call_item
 from signal_ark.mapping.chats import _drop_empty_chat_items, build_chat, build_chat_item
@@ -214,7 +216,7 @@ def _emit_attachments(
     message_frame_index: dict[str, int],
 ) -> list[str]:
     # 7. Handle attachments (if output dir provided)
-    output_files_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(output_files_dir)
 
     if _has_table(conn, "message_attachments"):
         attachments = _collect_modern_attachments(conn)

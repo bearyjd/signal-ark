@@ -23,7 +23,7 @@ from signal_ark.kdf import (
     backup_key_to_message_backup_key,
     validate_aep,
 )
-from signal_ark.fsutil import open_private, write_private_bytes, write_private_text
+from signal_ark.fsutil import ensure_private_dir, open_private, write_private_bytes, write_private_text
 from signal_ark.metadata import decrypt_metadata
 
 
@@ -74,7 +74,7 @@ def decrypt(
     output: Path,
 ) -> None:
     """Decrypt a v2 backup seed directory."""
-    output.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(output)
 
     aep = validate_aep(_read_passphrase(passphrase, passphrase_file))
     backup_key = aep_to_backup_key(aep)
@@ -362,7 +362,7 @@ def dump_v1(v1_backup: Path, v1_passphrase: str, output: Path) -> None:
 
     from signal_ark.v1_parser import parse_v1_backup
 
-    output.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(output)
     outfile = output / "v1-frames.jsonl"
 
     count = 0

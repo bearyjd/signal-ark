@@ -26,7 +26,7 @@ class WelcomeScreen(Screen):
             with RadioSet(id="mode-select"):
                 yield RadioButton("Build backup from Desktop", value=True)
                 yield RadioButton("Decrypt and inspect backup")
-                yield RadioButton("Import v1 backup (coming soon)", disabled=True)
+                yield RadioButton("Import v1 backup")
             with Horizontal(classes="button-row"):
                 yield Button("Next", variant="primary", id="welcome-next")
                 yield Button("Quit", id="welcome-quit")
@@ -65,6 +65,18 @@ class InputScreen(Screen):
                 id="input-passphrase",
             )
 
+            if state.mode == "import_v1":
+                yield Label("v1 backup file:", classes="field-label")
+                yield Input(placeholder="/path/to/signal.backup", id="input-v1-backup")
+                yield Button("Browse...", id="browse-v1-backup", variant="default")
+
+                yield Label("v1 passphrase (30 digits):", classes="field-label")
+                yield PassphraseInput(
+                    placeholder="Enter your 30-digit v1 passphrase",
+                    max_length=40,
+                    id="input-v1-passphrase",
+                )
+
             if state.mode == "build":
                 yield Label("Desktop database:", classes="field-label")
                 yield Input(placeholder="/path/to/db.sqlite", id="input-desktop-db")
@@ -74,6 +86,7 @@ class InputScreen(Screen):
                 yield Input(placeholder="/path/to/attachments.noindex", id="input-attachments-dir")
                 yield Button("Browse...", id="browse-attachments-dir", variant="default")
 
+            if state.mode in ("build", "import_v1"):
                 yield Label("Your ACI UUID:", classes="field-label")
                 yield Input(placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", id="input-self-aci")
 
@@ -101,6 +114,8 @@ class InputScreen(Screen):
             self.app.pop_screen()
         elif bid == "browse-seed-dir":
             self._browse("input-seed-dir")
+        elif bid == "browse-v1-backup":
+            self._browse("input-v1-backup", is_file=True)
         elif bid == "browse-desktop-db":
             self._browse("input-desktop-db", is_file=True)
         elif bid == "browse-attachments-dir":
@@ -124,7 +139,7 @@ class InputScreen(Screen):
             error_widget.update(f"Seed directory not found: {seed_dir}")
             return
 
-        passphrase = self.query_one(PassphraseInput).value.strip()
+        passphrase = self.query_one("#input-passphrase", PassphraseInput).value.strip()
         if not passphrase:
             error_widget.update("Passphrase is required.")
             return
@@ -135,6 +150,39 @@ class InputScreen(Screen):
         except (ValueError, SystemExit) as e:
             error_widget.update(f"Invalid passphrase: {e}")
             return
+
+        v1_path: Path | None = None
+        v1_passphrase = ""
+        if state.mode == "import_v1":
+            v1_str = self.query_one("#input-v1-backup", Input).value.strip()
+            if not v1_str:
+                error_widget.update("v1 backup file is required.")
+                return
+            v1_path = Path(v1_str)
+            if not v1_path.is_file():
+                error_widget.update(f"v1 backup not found: {v1_path}")
+                return
+            try:
+                from signal_ark.v1_decrypt import validate_v1_passphrase
+                v1_passphrase = validate_v1_passphrase(
+                    self.query_one("#input-v1-passphrase", PassphraseInput).value
+                )
+            except ValueError as e:
+                error_widget.update(f"Invalid v1 passphrase: {e}")
+                return
+
+            aci = self.query_one("#input-self-aci", Input).value.strip()
+            if not aci:
+                error_widget.update("ACI UUID is required.")
+                return
+            out_str = self.query_one("#input-output-dir", Input).value.strip()
+            if not out_str:
+                error_widget.update("Output directory is required.")
+                return
+            state.v1_backup_path = v1_path
+            state.v1_passphrase = v1_passphrase
+            state.self_aci = aci
+            state.output_dir = Path(out_str)
 
         state.seed_dir = seed_dir
         state.passphrase = passphrase
@@ -209,6 +257,7 @@ class PreviewScreen(Screen):
             self.query_one("#preview-stats", Static).update(
                 f"Mode: {state.mode}\n"
                 f"Seed: {state.seed_dir}\n"
+                + (f"v1 backup: {state.v1_backup_path}\n" if state.v1_backup_path else "")
                 + (f"Desktop DB: {state.desktop_db}\n" if state.desktop_db else "")
                 + f"\n{summary}"
             )
@@ -246,6 +295,8 @@ class ProgressScreen(Screen):
             self.run_worker(self._run_build, thread=True, exit_on_error=False)
         elif state.mode == "inspect":
             self.run_worker(self._run_inspect, thread=True, exit_on_error=False)
+        elif state.mode == "import_v1":
+            self.run_worker(self._run_import_v1, thread=True, exit_on_error=False)
 
     def _log(self, msg: str) -> None:
         self.app.call_from_thread(self._append_log, msg)
@@ -260,6 +311,10 @@ class ProgressScreen(Screen):
     def _run_inspect(self) -> dict[str, int]:
         from signal_ark.tui.worker import run_inspect
         return run_inspect(self.app.wizard_state, on_log=self._log, cancel=self.cancel_event)
+
+    def _run_import_v1(self) -> dict[str, int]:
+        from signal_ark.tui.worker import run_import_v1
+        return run_import_v1(self.app.wizard_state, on_log=self._log, cancel=self.cancel_event)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "progress-cancel":

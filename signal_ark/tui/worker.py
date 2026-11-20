@@ -12,7 +12,7 @@ from signal_ark.tui.app import WizardState
 
 
 class Cancelled(Exception):
-    """Raised when the user cancels a running build/inspect."""
+    """Raised when the user cancels a running build/inspect/import."""
 
 
 def _check_cancel(cancel: threading.Event | None) -> None:
@@ -146,6 +146,97 @@ def run_build(
             seed_frames=seed_result.frames,
             self_aci=state.self_aci,
             output_files_dir=files_dir,
+        )
+        _check_cancel(cancel)
+    except Cancelled:
+        _discard_new_files(files_dir, files_before, files_dir_preexisted)
+        raise
+
+    on_log(f"Mapped: {result.stats}")
+
+    backup_dir = state.output_dir / "signal-backup-rebuilt"
+    write_backup_directory(
+        output_dir=backup_dir,
+        backup_info=result.backup_info,
+        frames=result.frames,
+        hmac_key=hmac_key,
+        aes_key=aes_key,
+        backup_key=backup_key,
+        backup_id=meta.backup_id,
+        media_names=result.media_names,
+        version=meta.version,
+    )
+
+    on_log(f"Wrote backup to {backup_dir}")
+    on_log(f"Files: {files_dir} ({len(result.media_names)} entries)")
+    on_log("Done.")
+
+    state.result_output_dir = backup_dir
+    state.result_files_dir = files_dir
+    state.result_stats = dict(result.stats)
+    return dict(result.stats)
+
+
+def run_import_v1(
+    state: WizardState,
+    on_log: Callable[[str], None],
+    cancel: threading.Event | None = None,
+) -> dict[str, int]:
+    """Convert a v1 backup to a v2 backup directory and return stats.
+
+    Cancellation is cooperative: checkpoints run between steps. The
+    convert_v1_to_v2 call itself cannot be interrupted and finishes first.
+    """
+    from signal_ark.decrypt import decrypt_main, parse_frames
+    from signal_ark.encrypt import write_backup_directory
+    from signal_ark.kdf import aep_to_backup_key, backup_key_to_message_backup_key, validate_aep
+    from signal_ark.metadata import decrypt_metadata
+    from signal_ark.v1_to_v2 import convert_v1_to_v2
+
+    _check_cancel(cancel)
+    aep = validate_aep(state.passphrase)
+    backup_key = aep_to_backup_key(aep)
+
+    assert state.seed_dir is not None
+    meta = decrypt_metadata(state.seed_dir / "metadata", backup_key)
+    hmac_key, aes_key = backup_key_to_message_backup_key(backup_key, meta.backup_id)
+    on_log(f"BackupId: {meta.backup_id.hex()}")
+
+    _check_cancel(cancel)
+    seed_plaintext = decrypt_main((state.seed_dir / "main").read_bytes(), hmac_key, aes_key)
+    seed_result = parse_frames(seed_plaintext)
+    on_log(f"Parsed seed: {len(seed_result.frames)} frames.")
+
+    seed_account_frame = None
+    for f in seed_result.frames:
+        if f.HasField("account"):
+            seed_account_frame = f
+            break
+
+    if seed_account_frame is None:
+        raise RuntimeError("No AccountData frame found in seed backup")
+
+    assert state.output_dir is not None
+    assert state.v1_backup_path is not None
+    files_dir = state.output_dir / "files"
+    files_dir_preexisted = files_dir.exists()
+    files_before = _snapshot_files(files_dir)
+    _check_cancel(cancel)
+    on_log("Converting v1 backup to v2 frames...")
+
+    def progress(stage: str, done: int, skipped: int) -> None:
+        _check_cancel(cancel)
+        on_log(f"  [{stage}] processed={done} skipped={skipped}")
+
+    try:
+        result = convert_v1_to_v2(
+            v1_path=state.v1_backup_path,
+            v1_passphrase=state.v1_passphrase,
+            seed_backup_info=seed_result.backup_info,
+            seed_account_frame=seed_account_frame,
+            self_aci=state.self_aci,
+            output_files_dir=files_dir,
+            progress_callback=progress,
         )
         _check_cancel(cancel)
     except Cancelled:

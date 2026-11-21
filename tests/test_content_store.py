@@ -43,6 +43,16 @@ def test_frame_stats_counts_and_pointers() -> None:
     assert [(sent, fp.contentType) for sent, fp in pointers] == [("42", "image/png")]
 
 
+def test_frame_stats_includes_long_text_pointer() -> None:
+    frame = Frame()
+    ci = frame.chatItem
+    ci.dateSent = 7
+    ci.standardMessage.longText.contentType = "text/x-signal-plain"
+    ci.standardMessage.longText.locatorInfo.localKey = b"k" * 64
+    _counts, pointers = frame_stats([frame])
+    assert [(sent, fp.contentType) for sent, fp in pointers] == [("7", "text/x-signal-plain")]
+
+
 def test_inspect_output_pinned_with_attachment(tmp_path: Path) -> None:
     src = tmp_path / "pic.bin"
     src.write_bytes(b"hello attachment")

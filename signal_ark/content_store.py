@@ -20,13 +20,16 @@ def store_path(files_dir: Path, name: str) -> Path:
 
 
 def frame_stats(frames: Iterable[Frame]) -> tuple[dict[str, int], list[tuple[str, object]]]:
-    """Per-type frame counts and (dateSent, FilePointer) for each standard-message attachment."""
+    """Per-type frame counts and (dateSent, FilePointer) for each standard-message attachment and long-text pointer."""
     counts: dict[str, int] = {}
     pointers: list[tuple[str, object]] = []
     for frame in frames:
         item_type = frame.WhichOneof("item") or "unknown"
         counts[item_type] = counts.get(item_type, 0) + 1
         if item_type == "chatItem" and frame.chatItem.HasField("standardMessage"):
-            for ma in frame.chatItem.standardMessage.attachments:
+            std = frame.chatItem.standardMessage
+            for ma in std.attachments:
                 pointers.append((str(frame.chatItem.dateSent), ma.pointer))
+            if std.HasField("longText"):
+                pointers.append((str(frame.chatItem.dateSent), std.longText))
     return counts, pointers

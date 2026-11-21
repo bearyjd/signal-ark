@@ -206,6 +206,9 @@ def build(
     files_dir = output / "files"
     click.echo("Mapping Desktop data to backup frames...")
 
+    def progress(stage: str, done: int, skipped: int) -> None:
+        click.echo(f"  [{stage}] processed={done} skipped={skipped}")
+
     result = map_desktop_to_frames(
         db_path=desktop_db,
         attachments_dir=attachments_dir,
@@ -214,6 +217,7 @@ def build(
         seed_frames=seed_result.frames,
         self_aci=self_aci,
         output_files_dir=files_dir,
+        progress_callback=progress,
     )
 
     click.echo(f"Mapped: {result.stats}")

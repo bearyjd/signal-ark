@@ -137,6 +137,11 @@ def run_build(
 
     assert state.desktop_db is not None
     assert state.attachments_dir is not None
+
+    def progress(stage: str, done: int, skipped: int) -> None:
+        _check_cancel(cancel)
+        on_log(f"  [{stage}] processed={done} skipped={skipped}")
+
     try:
         result = map_desktop_to_frames(
             db_path=state.desktop_db,
@@ -146,6 +151,7 @@ def run_build(
             seed_frames=seed_result.frames,
             self_aci=state.self_aci,
             output_files_dir=files_dir,
+            progress_callback=progress,
         )
         _check_cancel(cancel)
     except Cancelled:

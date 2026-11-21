@@ -692,3 +692,23 @@ def test_run_import_v1_cancel_during_convert_discards_new_files(tmp_path, monkey
         run_import_v1(state, on_log=lambda _m: None, cancel=cancel)
     assert not files.exists()
     assert not written
+
+
+def test_run_build_forwards_mapping_progress_to_log(tmp_path, monkeypatch) -> None:
+    import threading
+    import types
+
+    from signal_ark.tui.worker import run_build
+
+    state = _build_state(tmp_path)
+    (state.seed_dir / "main").write_bytes(b"")
+
+    def fake_map(**kw):
+        kw["progress_callback"]("messages mapped", 5, 1)
+        return types.SimpleNamespace(stats={}, media_names=[], backup_info=None, frames=[])
+
+    _patch_build_deps(monkeypatch, fake_map)
+    logs: list[str] = []
+    run_build(state, on_log=logs.append, cancel=threading.Event())
+
+    assert "  [messages mapped] processed=5 skipped=1" in logs
